@@ -140,22 +140,133 @@ def type_badge_html(t: str) -> str:
 POKEAPI_MOVE = "https://pokeapi.co/api/v2/move"
 
 
-@st.cache_data(ttl=86400, show_spinner=False)
-def move_attack_type(move_name: str) -> str | None:
+def _move_name_to_slug(move_name: str) -> str:
     slug = move_name.lower().replace(" ", "-").replace("'", "").replace(".", "").replace("é", "e")
     slug = "".join(ch for ch in slug if ch.isalnum() or ch == "-")
     while "--" in slug:
         slug = slug.replace("--", "-")
-    slug = slug.strip("-")
+    return slug.strip("-")
+
+
+@st.cache_data(ttl=86400, show_spinner=False)
+def move_pokeapi_details(move_name: str) -> dict | None:
+    slug = _move_name_to_slug(move_name)
     if not slug:
         return None
     try:
         r = requests.get(f"{POKEAPI_MOVE}/{slug}", timeout=8)
         if r.status_code != 200:
             return None
-        return r.json().get("type", {}).get("name")
+        d = r.json()
+        dc = d.get("damage_class") or {}
+        return {
+            "type": (d.get("type") or {}).get("name"),
+            "power": d.get("power"),
+            "damage_class": dc.get("name") if isinstance(dc, dict) else None,
+            "name": d.get("name"),
+        }
     except requests.RequestException:
         return None
+
+
+def move_attack_type(move_name: str) -> str | None:
+    det = move_pokeapi_details(move_name)
+    return det.get("type") if det else None
+
+
+def _status_move_priority(display_name: str) -> float:
+    """Rough VGC-style priority for status / setup moves without relying on raw power."""
+    n = display_name.lower()
+    tiers = (
+        ("protect", 92.0),
+        ("fake out", 90.0),
+        ("spore", 88.0),
+        ("sleep powder", 82.0),
+        ("tailwind", 86.0),
+        ("trick room", 84.0),
+        ("thunder wave", 80.0),
+        ("will-o-wisp", 78.0),
+        ("helping hand", 76.0),
+        ("stealth rock", 74.0),
+        ("light screen", 70.0),
+        ("reflect", 70.0),
+        ("substitute", 66.0),
+        ("roost", 72.0),
+        ("recover", 68.0),
+        ("quiver dance", 79.0),
+        ("dragon dance", 79.0),
+        ("swords dance", 77.0),
+        ("calm mind", 76.0),
+        ("nasty plot", 75.0),
+        ("encore", 73.0),
+        ("taunt", 71.0),
+    )
+    for needle, pts in tiers:
+        if needle in n:
+            return pts
+    return 30.0
+
+
+def recommended_four_moves(row: pd.Series) -> list[str]:
+    """
+    Pick four moves from learnset using PokeAPI power/type/category + STAB + Atk/Sp.Atk lean.
+    Not official Smogon sets—fast heuristic for the dashboard.
+    """
+    moves = parse_list_cell(row.get("all_moves"))
+    if not moves:
+        return []
+
+    # Long learnsets: score head+tail so we still consider late TMs / tutors without 150+ API calls.
+    if len(moves) > 55:
+        moves = list(dict.fromkeys(moves[:38] + moves[-17:]))
+
+    types = [t.lower() for t in parse_list_cell(row.get("types"))]
+    atk, spa = int(row["attack"]), int(row["sp_attack"])
+    phys_bias = 1.12 if atk >= spa else 1.0
+    spec_bias = 1.12 if spa > atk else 1.0
+
+    scored: list[tuple[float, str]] = []
+    for m in moves:
+        det = move_pokeapi_details(str(m))
+        if not det:
+            continue
+        mt = (det.get("type") or "").lower()
+        power = det.get("power")
+        dc = (det.get("damage_class") or "status").lower()
+        stab = 1.5 if mt in types else 1.0
+
+        if power is not None and int(power) > 0:
+            sc = float(power) * stab
+            if dc == "physical":
+                sc *= phys_bias
+            elif dc == "special":
+                sc *= spec_bias
+        else:
+            sc = _status_move_priority(str(m)) * (1.08 if stab else 1.0)
+
+        scored.append((sc, str(m)))
+
+    scored.sort(key=lambda x: x[0], reverse=True)
+    out: list[str] = []
+    seen: set[str] = set()
+    for _, name in scored:
+        if name in seen:
+            continue
+        seen.add(name)
+        out.append(name)
+        if len(out) == 4:
+            break
+
+    if len(out) < 4:
+        for m in moves:
+            ms = str(m)
+            if ms not in seen:
+                seen.add(ms)
+                out.append(ms)
+            if len(out) == 4:
+                break
+
+    return out[:4]
 
 
 def row_has_super_effective_move(row: pd.Series, opponent_types: list[str]) -> bool:
@@ -367,6 +478,13 @@ with t3:
                     picks.append(("Flex", row))
                 picks = picks[:6]
 
+            with st.spinner("Ranking **best 4 moves** per Pokémon via PokeAPI (results are cached for 24h)…"):
+                core4_by_name: dict[str, list[str]] = {}
+                for _, prow in picks:
+                    nm = str(prow["name"])
+                    if nm not in core4_by_name:
+                        core4_by_name[nm] = recommended_four_moves(prow)
+
             st.success("Suggested team")
             st.markdown("#### Why this recommendation")
             st.info(
@@ -379,6 +497,9 @@ with t3:
                     if mode == "6v6"
                     else ""
                 )
+                + " Each card’s **core 4 moves** are auto-ranked from that Pokémon’s learnset using **PokeAPI** "
+                "(base power, STAB, physical vs special bias from its stats, plus a small priority list for "
+                "common support moves)—a **heuristic**, not a copied tournament export."
             )
 
             ncols = 3
@@ -391,6 +512,15 @@ with t3:
                             st.image(str(prow["image_url"]), use_container_width=True)
                         st.markdown(f"**{prow['name']}**")
                         st.caption(role)
+                        core4 = core4_by_name.get(str(prow["name"]), [])
+                        st.markdown("**Suggested 4 moves**")
+                        if core4:
+                            mv_cols = st.columns(4)
+                            for i, mv in enumerate(core4):
+                                with mv_cols[i]:
+                                    st.button(mv, key=f"tb_{prow['name']}_{role}_{row_start}_{i}", disabled=True, use_container_width=True)
+                        else:
+                            st.caption("No moves resolved (check network / PokeAPI).")
                         with st.expander("Why this Pokémon"):
                             st.markdown(_team_builder_insight(role, prow))
 
