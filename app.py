@@ -958,6 +958,14 @@ if "is_mega" in df_raw.columns:
     df_raw["is_mega"] = df_raw["is_mega"].map(
         lambda x: str(x).lower() in ("true", "1", "yes") if pd.notna(x) else False
     )
+for _bcol in ("is_final_evolution", "is_split_evolution_family", "is_regional_form", "is_legendary", "is_mythical", "is_ultra_beast"):
+    if _bcol in df_raw.columns:
+        df_raw[_bcol] = df_raw[_bcol].map(lambda x: str(x).lower() in ("true", "1", "yes") if pd.notna(x) else False)
+    else:
+        df_raw[_bcol] = False
+for _scol in ("base_species", "evolution_family_id", "branch_key", "regional_group", "final_evolution_options"):
+    if _scol not in df_raw.columns:
+        df_raw[_scol] = "" if _scol != "final_evolution_options" else "[]"
 
 
 def filter_by_games(frame: pd.DataFrame, versions: list[str]) -> pd.DataFrame:
@@ -1289,6 +1297,54 @@ def _team_offensive_stab_coverage(rows: list[pd.Series]) -> int:
     return len(_team_unique_types(rows))
 
 
+def _row_bool(row: pd.Series, key: str, default: bool = False) -> bool:
+    v = row.get(key, default)
+    if isinstance(v, bool):
+        return v
+    if isinstance(v, (int, float)):
+        return bool(v)
+    s = str(v).strip().lower()
+    if s in {"true", "1", "yes"}:
+        return True
+    if s in {"false", "0", "no", "nan", ""}:
+        return False
+    return default
+
+
+def _row_str(row: pd.Series, key: str, default: str = "") -> str:
+    v = row.get(key, default)
+    if v is None:
+        return default
+    s = str(v).strip()
+    if not s or s.lower() == "nan":
+        return default
+    return s
+
+
+def _is_team_constraint_valid(rows: list[pd.Series]) -> bool:
+    """Compatibility-first constraints using optional evolution metadata columns."""
+    # Max 3 legendary.
+    leg_count = sum(1 for r in rows if _row_bool(r, "is_legendary", False))
+    if leg_count > 3:
+        return False
+    # Max 1 regional form (when column exists / populated).
+    reg_count = sum(1 for r in rows if _row_bool(r, "is_regional_form", False))
+    if reg_count > 1:
+        return False
+    # Split evolution family: at most one member from any split family.
+    fam_count: dict[str, int] = {}
+    for r in rows:
+        if not _row_bool(r, "is_split_evolution_family", False):
+            continue
+        fam = _row_str(r, "evolution_family_id", "")
+        if not fam:
+            continue
+        fam_count[fam] = fam_count.get(fam, 0) + 1
+        if fam_count[fam] > 1:
+            return False
+    return True
+
+
 def suggest_best_replacement_for_party(
     *,
     picks: list[tuple[str, pd.Series]],
@@ -1317,6 +1373,11 @@ def suggest_best_replacement_for_party(
     if candidates.empty:
         return (None, "No replacement candidates available in filtered roster.")
 
+    # Prefer fully evolved candidates when metadata is present and at least one exists.
+    finals = candidates[candidates.apply(lambda r: _row_bool(r, "is_final_evolution", False), axis=1)]
+    if not finals.empty:
+        candidates = finals
+
     best_row: pd.Series | None = None
     best_score = float("-inf")
     best_reason = ""
@@ -1328,6 +1389,8 @@ def suggest_best_replacement_for_party(
             continue
         trial_rows = list(base_rows)
         trial_rows[replace_idx] = cand
+        if not _is_team_constraint_valid(trial_rows):
+            continue
         unique_now = len(_team_unique_types(trial_rows))
         weak_now = _max_team_weak_to_single_type(trial_rows)
         mix_now = team_move_class_mix(trial_rows, "Suggested 4 (heuristic)", core4_cache)
