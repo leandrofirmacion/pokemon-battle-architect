@@ -915,30 +915,70 @@ def apply_sidebar_filters(
     return out
 
 
+MODE_PRESETS: tuple[str, ...] = (
+    "Custom",
+    "Champions ranked 3v3",
+    "Legends Z-A ranked 3v3",
+    "Party planning",
+)
+
+
+def _apply_mode_preset() -> None:
+    """Apply sidebar/simulator defaults for the selected preset."""
+    p = st.session_state.get("ui_mode_preset", "Custom")
+    if p == "Champions ranked 3v3":
+        st.session_state["side_game_pick"] = ["Champions"]
+        st.session_state["side_type_pick"] = []
+        st.session_state["side_mega_pick"] = "All"
+        st.session_state["side_game_type_pick"] = "Champions only"
+        st.session_state["bs_opponent_pool"] = "Champions (full dex)"
+        st.session_state["bs_roster_mode"] = "Active 3 (ranked ladder)"
+    elif p == "Legends Z-A ranked 3v3":
+        st.session_state["side_game_pick"] = ["Legends Z-A"]
+        st.session_state["side_type_pick"] = []
+        st.session_state["side_mega_pick"] = "All"
+        st.session_state["side_game_type_pick"] = "Legends Z-A only"
+        st.session_state["bs_opponent_pool"] = "Sidebar-filtered roster"
+        st.session_state["bs_roster_mode"] = "Active 3 (ranked ladder)"
+    elif p == "Party planning":
+        st.session_state["side_game_pick"] = ["Champions", "Legends Z-A"]
+        st.session_state["side_type_pick"] = []
+        st.session_state["side_mega_pick"] = "All"
+        st.session_state["side_game_type_pick"] = "Any"
+        st.session_state["bs_opponent_pool"] = "Sidebar-filtered roster"
+        st.session_state["bs_roster_mode"] = "Party box (6 Pokémon)"
+
+
 with st.sidebar:
     st.header("Global filter")
+    st.selectbox("Mode preset", options=list(MODE_PRESETS), key="ui_mode_preset")
+    st.button("Apply preset", key="ui_mode_apply", on_click=_apply_mode_preset)
     game_pick = st.multiselect(
         "Game version",
         options=["Champions", "Legends Z-A"],
         default=["Champions", "Legends Z-A"],
+        key="side_game_pick",
         help="Rows where game_source contains the selected label.",
     )
     type_pick = st.multiselect(
         "Type",
         options=[t.title() for t in TYPE_FILTER_ORDER],
         default=[],
+        key="side_type_pick",
         help="Pokémon that have any selected type (primary or secondary). Leave empty for all types.",
     )
     mega_pick = st.selectbox(
         "Mega",
         options=["All", "Mega", "Not mega"],
         index=0,
+        key="side_mega_pick",
         help="Filter by Mega Evolution rows (is_mega).",
     )
     game_type_pick = st.selectbox(
         "Game type",
         options=["Any", "Champions only", "Legends Z-A only", "Both games"],
         index=0,
+        key="side_game_type_pick",
         help="Refine by how game_source tags Champions vs Legends Z-A (exclusive or both).",
     )
 
@@ -1734,6 +1774,7 @@ with t4:
             "Opponent pool",
             options=["Champions (full dex)", "Sidebar-filtered roster"],
             index=0,
+            key="bs_opponent_pool",
             help="Random opposing **3-Pokémon** teams for ranked 3v3.",
         )
     with c_opt2:
