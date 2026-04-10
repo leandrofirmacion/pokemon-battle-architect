@@ -379,6 +379,31 @@ def wilson_score_interval(successes: int, n: int, z: float = 1.96) -> tuple[floa
     return (max(0.0, center - spread), min(1.0, center + spread))
 
 
+def confidence_badge(sample_size: int) -> str:
+    """Rough confidence label for Monte Carlo sample sizes."""
+    n = int(sample_size)
+    if n >= 200:
+        return "High"
+    if n >= 80:
+        return "Medium"
+    return "Quick"
+
+
+def render_rules_summary(
+    *,
+    format_label: str,
+    opponent_label: str,
+    move_pool: str,
+    scoring_label: str,
+    seed: int,
+) -> None:
+    """Compact run-settings summary so users know exactly what is being simulated."""
+    st.caption(
+        f"Rules: **{format_label}** · Opponents **{opponent_label}** · Moves **{move_pool}** · "
+        f"Scoring **{scoring_label}** · Seed **{int(seed)}**"
+    )
+
+
 def moves_for_battle_sim(
     row: pd.Series,
     move_pool: str,
@@ -1480,6 +1505,19 @@ with t3:
                 )
                 st.caption(BATTLE_SCORING_DESCRIPTIONS[tb_q_score_pick])
                 tb_q_scoring = BATTLE_SCORING_INTERNAL[tb_q_score_pick]
+                render_rules_summary(
+                    format_label="Ranked 3v3",
+                    opponent_label=("Champions" if tb_q_opp == "Champions (full dex)" else "sidebar-filtered roster"),
+                    move_pool=tb_q_moves,
+                    scoring_label=BATTLE_SCORING_SUMMARY_LABEL.get(tb_q_scoring, tb_q_scoring),
+                    seed=int(tb_seed),
+                )
+                sims_per_battle = 20 if tb_party_subset == PARTY_SUBSET_ORACLE else 1
+                est_sims = int(tb_q_bpt) * sims_per_battle
+                st.caption(
+                    f"Estimated work: **{est_sims}** battle sims "
+                    f"({int(tb_q_bpt)} battles × {sims_per_battle} sim/battle)."
+                )
 
                 if st.button("Run quick win-rate estimate", key="tb_quick_run"):
                     opp_f = champs if tb_q_opp == "Champions (full dex)" else df
@@ -1516,6 +1554,7 @@ with t3:
                             f"{100 * wr:.1f}%",
                             help=f"Wilson 95% (wins): {100 * lo:.1f}%–{100 * hi:.1f}%",
                         )
+                        st.caption(f"Estimate confidence: **{confidence_badge(nb)}** (n={nb} battles).")
 
             with st.expander("Best trio in this box (paired rounds)", expanded=False):
                 st.caption(
@@ -1549,6 +1588,10 @@ with t3:
                             step=1,
                             key="tb_box_trios_topn",
                         )
+                    st.caption(
+                        f"Estimated work: **{int(tb_box_rounds) * 20}** battle sims "
+                        f"({int(tb_box_rounds)} rounds × 20 trios)."
+                    )
                     if st.button("Rank trios in this party", key="tb_box_trios_run"):
                         opp_fb = champs if tb_q_opp == "Champions (full dex)" else df
                         if opp_fb.empty or len(opp_fb) < 3:
@@ -1586,6 +1629,7 @@ with t3:
                                 f"{100 * wr_b:.1f}%",
                                 help=f"Wilson 95% (wins): {100 * lo_b:.1f}%–{100 * hi_b:.1f}%",
                             )
+                            st.caption(f"Estimate confidence: **{confidence_badge(nbtr)}** (n={nbtr} rounds).")
                             topn = min(int(tb_box_topn), len(ranked_tb))
                             rows_df = []
                             for lab, wv, lv, tv in ranked_tb[:topn]:
@@ -1745,6 +1789,13 @@ with t4:
         bs_party_subset_ui = (
             PARTY_SUBSET_ORACLE if "Oracle" in bs_party_pick else PARTY_SUBSET_RANDOM
         )
+    render_rules_summary(
+        format_label="Ranked 3v3",
+        opponent_label=pool_label,
+        move_pool=move_pool,
+        scoring_label=BATTLE_SCORING_SUMMARY_LABEL.get(scoring, scoring),
+        seed=int(seed_val),
+    )
 
     for _i in range(6):
         if f"bs_dd_{_i}" not in st.session_state:
@@ -1821,6 +1872,10 @@ with t4:
                     step=1,
                     key="bs_box_trios_topn",
                 )
+            st.caption(
+                f"Estimated work: **{int(bs_box_rounds) * 20}** battle sims "
+                f"({int(bs_box_rounds)} rounds × 20 trios)."
+            )
             if bs_roster_mode != "Party box (6 Pokémon)":
                 st.info("Switch to **Party box (6 Pokémon)** and fill six distinct slots.")
             elif st.button("Rank trios in this party", type="secondary", key="bs_box_trios_run"):
@@ -1867,6 +1922,7 @@ with t4:
                         f"{100 * wr_bb:.1f}%",
                         help=f"Wilson 95% (wins): {100 * lo_bb:.1f}%–{100 * hi_bb:.1f}%",
                     )
+                    st.caption(f"Estimate confidence: **{confidence_badge(nbr)}** (n={nbr} rounds).")
                     top_nb = min(int(bs_box_topn), len(ranked_bs))
                     st.dataframe(
                         pd.DataFrame(
@@ -2013,6 +2069,10 @@ with t4:
                                 help=f"Wilson 95% interval (wins only): {100 * lo:.1f}%–{100 * hi:.1f}%",
                             )
                             st.caption(
+                                f"Estimate confidence: **{confidence_badge(nb)}** "
+                                f"(n={nb} battles per candidate)."
+                            )
+                            st.caption(
                                 f"Search: **{'exhaustive' if use_exhaustive else 'random'}** · "
                                 f"**{n_teams}** teams · **{nb}** battles/team · "
                                 f"RNG **{int(seed_val) + 90210}** · opponent **{pool_label}** · "
@@ -2125,6 +2185,7 @@ with t4:
                     f"{100 * win_rate:.1f}%",
                     help=f"Wilson 95% interval (wins only): {100 * lo:.1f}%–{100 * hi:.1f}%",
                 )
+                st.caption(f"Estimate confidence: **{confidence_badge(n_b)}** (n={n_b} battles).")
                 party_note = ""
                 if party_subset_run == PARTY_SUBSET_ORACLE:
                     party_note = " · party **oracle** (≤20 sims/battle)"
