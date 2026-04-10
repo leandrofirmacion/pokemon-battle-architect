@@ -416,13 +416,28 @@ def best_type_effectiveness_vs(move_names: list[str], opponent_types: list[str])
 COMPETITIVE_BATTLE_LEVEL = 50
 COMPETITIVE_IV = 31
 # 252 offensive / 252 Speed / 4 HP; nature +Speed −Atk (Timid) or −Sp.Atk (Jolly)
-SCORING_BINARY = "Standard Coverage: Counts every super-effective hit as equal."
-SCORING_WEIGHTED = (
-    "Max Damage Bias: Rewards 4× weaknesses (Double Super-Effective) more heavily."
-)
-SCORING_COMPETITIVE = (
-    "Competitive EV/IV (Lv 50: 31 IV, 252/252/4 + Speed nature — damage stub × speed)"
-)
+SCORING_STANDARD = "standard_coverage"
+SCORING_MAX_DAMAGE = "max_damage_bias"
+SCORING_COMPETITIVE = "competitive_ev_iv"
+
+BATTLE_SCORING_OPTIONS: tuple[str, ...] = ("Standard Coverage", "Max Damage", "Competitive EV/IV")
+BATTLE_SCORING_INTERNAL: dict[str, str] = {
+    "Standard Coverage": SCORING_STANDARD,
+    "Max Damage": SCORING_MAX_DAMAGE,
+    "Competitive EV/IV": SCORING_COMPETITIVE,
+}
+BATTLE_SCORING_DESCRIPTIONS: dict[str, str] = {
+    "Standard Coverage": "Counts every super-effective hit as equal.",
+    "Max Damage": "Rewards 4× weaknesses (double super-effective) more heavily.",
+    "Competitive EV/IV": (
+        "Lv 50, 31 IV, 252/252/4 + speed nature; damage stub with STAB and type chart, scaled by Speed."
+    ),
+}
+BATTLE_SCORING_SUMMARY_LABEL: dict[str, str] = {
+    SCORING_STANDARD: "standard coverage",
+    SCORING_MAX_DAMAGE: "max damage",
+    SCORING_COMPETITIVE: "competitive EV/IV",
+}
 
 
 def _nature_mults(plus: str, minus: str) -> dict[str, float]:
@@ -566,7 +581,7 @@ def run_coverage_battle(
     core4_cache: dict[str, list[str]],
 ) -> tuple[float, float, str]:
     """
-    Random active slot each turn. Binary/Weighted: type-chart effectiveness only.
+    Random active slot each turn. Standard / max damage: type-chart effectiveness only.
     Competitive: Lv 50 + 31 IV + 252/252/4 + speed nature; damage stub × speed tie.
     """
     n_team = len(my_rows)
@@ -584,10 +599,10 @@ def run_coverage_battle(
         my_types = parse_list_cell(my_rows[i].get("types"))
         my_best = best_type_effectiveness_vs(my_m, opp_types)
         opp_best = best_type_effectiveness_vs(opp_m, my_types)
-        if scoring == SCORING_BINARY:
+        if scoring == SCORING_STANDARD:
             my_pts += 1.0 if my_best > 1.0 else 0.0
             opp_pts += 1.0 if opp_best > 1.0 else 0.0
-        elif scoring == SCORING_WEIGHTED:
+        elif scoring == SCORING_MAX_DAMAGE:
             my_pts += my_best if my_best > 1.0 else 0.0
             opp_pts += opp_best if opp_best > 1.0 else 0.0
         elif scoring == SCORING_COMPETITIVE:
@@ -1031,7 +1046,7 @@ with t3:
 with t4:
     st.subheader("Monte Carlo — coverage simulator")
     st.caption(
-        "Each **turn** picks a random slot on both teams (3v3 or 6v6). **Standard Coverage** and **Max Damage Bias** "
+        "Each **turn** picks a random slot on both teams (3v3 or 6v6). **Standard Coverage** and **Max Damage** "
         "use only type effectiveness (PokeAPI move types, **cached 24h**). **Competitive EV/IV** adds **Lv 50** stats with "
         "**31 IV**, **252 / 252 / 4** EVs, **Timid** (special) or **Jolly** (physical), then a **damage stub** "
         "(STAB + type chart) scaled by **Speed** (+5% faster, −5% slower)."
@@ -1056,11 +1071,16 @@ with t4:
             "(head+tail) to limit PokeAPI calls.",
         )
 
-    scoring = st.radio(
-        "Scoring",
-        options=[SCORING_BINARY, SCORING_WEIGHTED, SCORING_COMPETITIVE],
+    st.markdown("**Scoring**")
+    scoring_choice = st.radio(
+        "Scoring mode",
+        options=list(BATTLE_SCORING_OPTIONS),
         horizontal=True,
+        label_visibility="collapsed",
+        key="battle_scoring_mode",
     )
+    st.caption(BATTLE_SCORING_DESCRIPTIONS[scoring_choice])
+    scoring = BATTLE_SCORING_INTERNAL[scoring_choice]
 
     s1, s2, s3 = st.columns(3)
     with s1:
@@ -1226,7 +1246,7 @@ with t4:
                     f"{n_b} battles vs random **{pool_label}** **{team_size}v{team_size}** teams · "
                     f"**{int(num_turns)}** turns/battle · seed **{int(seed_val)}** · "
                     f"**{move_pool.split()[0]}** moves · "
-                    f"**{'standard coverage' if scoring == SCORING_BINARY else 'max damage bias' if scoring == SCORING_WEIGHTED else 'competitive Lv50'}** scoring."
+                    f"**{BATTLE_SCORING_SUMMARY_LABEL.get(scoring, scoring)}** scoring."
                 )
 
                 with st.expander("Sample battle log (first battles in this run)"):
