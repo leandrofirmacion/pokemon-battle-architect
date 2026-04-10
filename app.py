@@ -1333,10 +1333,8 @@ def render_team_builder_summary(picks: list[tuple[str, pd.Series]], core4_by_nam
 with t3:
     st.subheader("Team Builder — role bands + random")
     st.caption(
-        "Builds a **six-Pokémon party** for ranked play (Champions / Legends Z-A): you bring **three** in "
-        "each ladder match. Random samples from **Speedster / Tank / Heavy hitter** pools on your "
-        "**sidebar-filtered** roster. Tune thresholds and **seed** to explore; constraints optionally **retry** "
-        "sampling. **Core 4** moves use the same **PokeAPI** heuristic as elsewhere."
+        "Build a **Party (6)**, then choose your **Active team (3)** for ranked-style 3v3.\n"
+        "Random picks use Speedster/Tank/Heavy pools from your filtered roster. Not cartridge/Showdown rules."
     )
 
     tb_party_size = 6
@@ -1393,7 +1391,7 @@ with t3:
         help="Filled slots skip random picks for those Pokémon; remaining slots use role bands.",
     )
 
-    if st.button("Generate team (role bands + random)", type="primary", key="tb_generate_btn"):
+    if st.button("Generate Party (6)", type="primary", key="tb_generate_btn"):
         p = df.copy()
         spd_chk = p[p["speed"] > int(thr_speed)]
         tnk_chk = p[(p["hp"] > int(thr_bulk)) | (p["defense"] > int(thr_bulk))]
@@ -1476,9 +1474,8 @@ with t3:
 
             with st.expander("Quick simulator — win rate vs random opponents", expanded=False):
                 st.caption(
-                    "Ranked is always **3v3**. With a **six-Pokémon** party, choose how the simulator picks "
-                    "your three each match. Same toy model as **Battle Simulator** (not cartridge/Showdown). "
-                    "**Oracle** runs up to **20** trio simulations per battle (all C(6,3))."
+                    "Estimate your Party (6) in ranked-style **3v3** by selecting how Active team (3) is chosen.\n"
+                    "Oracle checks all 20 trios per match. This is a toy sim, not cartridge/Showdown."
                 )
                 q1, q2 = st.columns(2)
                 with q1:
@@ -1633,7 +1630,7 @@ with t3:
                         f"Estimated work: **{int(tb_box_rounds) * 20}** battle sims "
                         f"({int(tb_box_rounds)} rounds × 20 trios)."
                     )
-                    if st.button("Rank trios in this party", key="tb_box_trios_run"):
+                    if st.button("Rank trios in Party (6)", key="tb_box_trios_run"):
                         opp_fb = champs if tb_q_opp == "Champions (full dex)" else df
                         if opp_fb.empty or len(opp_fb) < 3:
                             st.warning("Opponent pool too small for 3v3.")
@@ -1762,11 +1759,8 @@ with t3:
 with t4:
     st.subheader("Monte Carlo — coverage simulator")
     st.caption(
-        "Ranked (Champions / Legends Z-A) is **3v3** only. Build a **six-Pokémon party** here or in Team Builder, "
-        "then score how often a **random or oracle** trio wins vs random opponents. Each **turn** picks a random "
-        "active slot on both teams. **Standard Coverage** and **Max Damage** use type effectiveness (PokeAPI, "
-        "**cached 24h**). **Competitive EV/IV** uses **Lv 50** stats with **31 IV**, **252 / 252 / 4** EVs, "
-        "**Timid**/**Jolly**, then a **damage stub** scaled by **Speed** (+5% / −5%)."
+        "Run ranked-style **3v3** sims for Champions / Legends Z-A.\n"
+        "Use an Active team (3) or a Party (6) with random/oracle trio selection. Toy model, not cartridge/Showdown."
     )
 
     c_opt1, c_opt2 = st.columns(2)
@@ -1776,15 +1770,14 @@ with t4:
             options=["Champions (full dex)", "Sidebar-filtered roster"],
             index=0,
             key="bs_opponent_pool",
-            help="Random opposing **3-Pokémon** teams for ranked 3v3.",
+            help="Opponent Active team (3) source for ranked-style 3v3.",
         )
     with c_opt2:
         move_pool = st.selectbox(
             "Moves considered",
             options=["Suggested 4 (heuristic)", "Full learnset (trimmed if huge)"],
             index=0,
-            help="Suggested 4 matches Team Builder heuristics. Full learnset caps at 55 moves "
-            "(head+tail) to limit PokeAPI calls.",
+            help="Suggested 4 follows Team Builder logic. Full learnset is trimmed to reduce API calls.",
         )
 
     st.markdown("**Scoring**")
@@ -1816,7 +1809,7 @@ with t4:
         ["Active 3 (ranked ladder)", "Party box (6 Pokémon)"],
         horizontal=True,
         key="bs_roster_mode",
-        help="Ladder uses three Pokémon per match. Party mode keeps six in the box and picks three each battle.",
+        help="Choose either a fixed Active team (3) or a Party (6) with trio selection each battle.",
     )
     bs_party_subset_ui = PARTY_SUBSET_OFF
     if bs_roster_mode == "Party box (6 Pokémon)":
@@ -1888,11 +1881,10 @@ with t4:
 
         opponent_champions_full = opponent_pool == "Champions (full dex)"
 
-        with st.expander("Best trio in this box (paired rounds)", expanded=False):
+        with st.expander("Best trio in Party (6) — paired rounds", expanded=False):
             st.caption(
-                "Ranks all **20** trios from your **six-Pokémon** party. Each **round** samples **one** random "
-                "3v3 opponent; every trio faces that same team—fair comparison **within the box** only. Uses "
-                "**turns**, **moves**, and **scoring** from this tab."
+                "Ranks all 20 trios from your Party (6).\n"
+                "Each round uses one opponent team for all trios, so comparisons are fair within your party."
             )
             bx1, bx2 = st.columns(2)
             with bx1:
@@ -1920,7 +1912,7 @@ with t4:
             )
             if bs_roster_mode != "Party box (6 Pokémon)":
                 st.info("Switch to **Party box (6 Pokémon)** and fill six distinct slots.")
-            elif st.button("Rank trios in this party", type="secondary", key="bs_box_trios_run"):
+            elif st.button("Rank trios in Party (6)", type="secondary", key="bs_box_trios_run"):
                 bn: list[str] = []
                 bad = False
                 for i in range(6):
@@ -1983,12 +1975,10 @@ with t4:
                         use_container_width=True,
                     )
 
-        with st.expander("Find best team by simulator win rate", expanded=False):
+        with st.expander("Find best Active team (3) by win rate", expanded=False):
             st.caption(
-                "Searches **3-Pokémon** active trios from the **filtered roster** (ranked format)—not a six-Pokémon "
-                "party box. Optimizes **this app’s toy simulator** only—not cartridge or Showdown. "
-                "**Random search** finds a strong trio, not a proven global optimum on large rosters. "
-                "Many candidates reuse **PokeAPI** move data (**cached 24h**)."
+                "Searches Active team (3) candidates from your filtered roster.\n"
+                "Optimizes this app's toy simulator only (not cartridge/Showdown)."
             )
             ox1, ox2, ox3 = st.columns(3)
             with ox1:
