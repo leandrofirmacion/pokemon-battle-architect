@@ -27,6 +27,17 @@ def resolve_csv_path() -> Path | None:
     return None
 
 
+def resolve_name_from_roster(typed: str, name_series: pd.Series) -> str | None:
+    """Case-insensitive exact match against roster display names; returns canonical CSV name."""
+    t = typed.strip().lower()
+    if not t:
+        return None
+    for canon in name_series.astype(str).unique():
+        if str(canon).strip().lower() == t:
+            return str(canon)
+    return None
+
+
 def parse_list_cell(val) -> list:
     if val is None or (isinstance(val, float) and pd.isna(val)):
         return []
@@ -359,10 +370,15 @@ def run_coverage_battle(
     One abstract battle: random lane each turn, score from type effectiveness of movepool.
     Returns (my_score, opp_score, outcome) with outcome in win, loss, tie.
     """
+    n_team = len(my_rows)
+    if n_team < 1 or len(opp_rows) != n_team:
+        raise ValueError("Both teams must be non-empty and the same size.")
+
     my_pts = 0.0
     opp_pts = 0.0
+    hi = n_team - 1
     for _ in range(num_turns):
-        i = rng.randint(0, 2)
+        i = rng.randint(0, hi)
         my_m = moves_for_battle_sim(my_rows[i], move_pool, core4_cache)
         opp_m = moves_for_battle_sim(opp_rows[i], move_pool, core4_cache)
         opp_types = parse_list_cell(opp_rows[i].get("types"))
@@ -644,6 +660,11 @@ with t3:
                     picks.append(("Flex", row))
                 picks = picks[:6]
 
+            st.session_state["last_built_team"] = {
+                "format": mode,
+                "names": [str(prow["name"]) for _, prow in picks],
+            }
+
             with st.spinner("Ranking **best 4 moves** per Pokémon via PokeAPI (results are cached for 24h)…"):
                 core4_by_name: dict[str, list[str]] = {}
                 for _, prow in picks:
@@ -733,7 +754,7 @@ with t3:
 with t4:
     st.subheader("Monte Carlo — coverage simulator")
     st.caption(
-        "Toy benchmark: each **turn** picks a random slot on both trios. Scores come from **type "
+        "Toy benchmark: each **turn** picks a random slot on both teams (3v3 or 6v6). Scores come from **type "
         "effectiveness** of moves in the chosen pool (PokeAPI move types, **cached 24h**). "
         "This is **not** a damage or speed simulator."
     )
@@ -746,7 +767,7 @@ with t4:
             "Opponent pool",
             options=["Champions (full dex)", "Sidebar-filtered roster"],
             index=0,
-            help="Where random opposing trios are sampled from.",
+            help="Where random opposing teams are sampled from (same size as your format).",
         )
     with c_opt2:
         move_pool = st.selectbox(
@@ -777,84 +798,174 @@ with t4:
     opp_frame = champs if opponent_pool == "Champions (full dex)" else df
     pool_label = "Champions" if opponent_pool == "Champions (full dex)" else "filtered roster"
 
-    if opp_frame.empty or len(opp_frame) < 3:
-        st.warning(f"Opponent pool ({pool_label}) needs at least 3 Pokémon; adjust filters or CSV.")
+    bs_format = st.radio("Your format", ["3v3", "6v6"], horizontal=True, key="bs_format")
+    team_size = 3 if bs_format == "3v3" else 6
+
+    if "bs_txt_0" not in st.session_state:
+        st.session_state["bs_txt_0"] = ""
+    for _i in range(1, 6):
+        if f"bs_dd_{_i}" not in st.session_state:
+            st.session_state[f"bs_dd_{_i}"] = "—"
+
+    if opp_frame.empty or len(opp_frame) < team_size:
+        st.warning(
+            f"Opponent pool ({pool_label}) needs at least **{team_size}** Pokémon; adjust filters or CSV."
+        )
     else:
         my_opts = sorted(df["name"].astype(str).unique().tolist())
-        team3 = st.multiselect("Your team (pick 3)", options=my_opts, max_selections=3)
-        run_label = f"Run {int(num_battles)} battles"
-        if len(team3) == 3 and st.button(run_label, type="primary"):
-            rng = random.Random(int(seed_val))
-            my_rows = [df.loc[df["name"] == n].iloc[0] for n in team3]
-            core4_cache: dict[str, list[str]] = {}
-            for r in my_rows:
-                core4_cache[str(r["name"])] = recommended_four_moves(r)
+        blank = "—"
+        sel_opts = [blank] + my_opts
 
-            wins = losses = ties = 0
-            battle_log: list[dict] = []
-            log_cap = min(25, max(5, int(num_battles) // 20))
-
-            bar = st.progress(0)
-            n_b = int(num_battles)
-            for b in range(n_b):
-                opp_sample = opp_frame.sample(3, random_state=rng.randint(0, 10_000_000))
-                onames = opp_sample["name"].tolist()
-                source = df_raw if opponent_pool == "Champions (full dex)" else df
-                opp_rows = [source.loc[source["name"] == on].iloc[0] for on in onames]
-                for r in opp_rows:
-                    nm = str(r["name"])
-                    if nm not in core4_cache:
-                        core4_cache[nm] = recommended_four_moves(r)
-
-                my_pts, opp_pts, outcome = run_coverage_battle(
-                    my_rows,
-                    opp_rows,
-                    rng,
-                    num_turns=int(num_turns),
-                    move_pool=move_pool,
-                    scoring=scoring,
-                    core4_cache=core4_cache,
-                )
-                if outcome == "win":
-                    wins += 1
-                elif outcome == "loss":
-                    losses += 1
-                else:
-                    ties += 1
-
-                if len(battle_log) < log_cap:
-                    battle_log.append(
-                        {
-                            "#": b + 1,
-                            "result": outcome.upper(),
-                            "you": round(my_pts, 2),
-                            "opp": round(opp_pts, 2),
-                            "they": ", ".join(str(x) for x in onames),
-                        }
-                    )
-
-                bar.progress((b + 1) / n_b)
-            bar.empty()
-
-            win_rate = wins / n_b
-            lo, hi = wilson_score_interval(wins, n_b)
-            m1, m2, m3 = st.columns(3)
-            with m1:
-                st.metric("Wins", wins)
-            with m2:
-                st.metric("Losses", losses)
-            with m3:
-                st.metric("Ties", ties)
-            st.metric(
-                "Win rate",
-                f"{100 * win_rate:.1f}%",
-                help=f"Wilson 95% interval (wins only): {100 * lo:.1f}%–{100 * hi:.1f}%",
-            )
+        st.markdown("##### Your team")
+        tb = st.session_state.get("last_built_team")
+        if tb and tb.get("names"):
             st.caption(
-                f"{n_b} battles vs random **{pool_label}** trios · **{int(num_turns)}** turns/battle · "
-                f"seed **{int(seed_val)}** · **{move_pool.split()[0]}** moves · "
-                f"{'binary' if 'Binary' in scoring else 'weighted'} scoring."
+                f"Last Team Builder team ({tb.get('format', '?')}): **{', '.join(tb['names'])}**"
+            )
+        else:
+            st.caption(
+                "Use **Team Builder → Generate Meta-Optimal Team**, then **Apply last Team Builder team** here."
             )
 
-            with st.expander("Sample battle log (first battles in this run)"):
-                st.dataframe(pd.DataFrame(battle_log), hide_index=True, use_container_width=True)
+        if st.button("Apply last Team Builder team", key="bs_apply_tb"):
+            if not tb or not tb.get("names"):
+                st.warning("Open **Team Builder** and click **Generate Meta-Optimal Team** first.")
+            else:
+                nms = list(tb["names"])
+                if len(nms) >= 6 and team_size == 3:
+                    st.info(
+                        "Team Builder has 6 Pokémon; using the **first 3**. Switch to **6v6** for the full roster."
+                    )
+                elif len(nms) < team_size:
+                    st.warning(
+                        f"Team Builder only has **{len(nms)}** Pokémon; fill remaining slots manually."
+                    )
+                st.session_state["bs_txt_0"] = nms[0] if nms else ""
+                for i in range(1, 6):
+                    if i < team_size:
+                        if i < len(nms):
+                            pick = nms[i]
+                            st.session_state[f"bs_dd_{i}"] = pick if pick in my_opts else blank
+                        else:
+                            st.session_state[f"bs_dd_{i}"] = blank
+                    else:
+                        st.session_state[f"bs_dd_{i}"] = blank
+                st.rerun()
+
+        st.text_input(
+            "Pokémon 1",
+            key="bs_txt_0",
+            placeholder="Type roster name (case ignored)…",
+            help="Must match a name from the filtered roster exactly (ignoring case).",
+        )
+        for i in range(1, team_size):
+            st.selectbox(
+                f"Pokémon {i + 1}",
+                options=sel_opts,
+                key=f"bs_dd_{i}",
+            )
+
+        def _gather_my_team() -> tuple[list[str] | None, str | None]:
+            raw0 = st.session_state.get("bs_txt_0", "")
+            if not str(raw0).strip():
+                return None, "Enter **Pokémon 1** by name."
+            r0 = resolve_name_from_roster(str(raw0), df["name"])
+            if r0 is None:
+                return None, f"Pokémon 1 **{str(raw0).strip()!r}** is not in the filtered roster."
+            names: list[str] = [r0]
+            for i in range(1, team_size):
+                sel = st.session_state.get(f"bs_dd_{i}", blank)
+                if not sel or sel == blank:
+                    return None, f"Choose **Pokémon {i + 1}** from the dropdown."
+                names.append(sel)
+            return names, None
+
+        tn, _ = _gather_my_team()
+        if tn:
+            st.caption(f"**Ready:** {', '.join(tn)}")
+        else:
+            st.caption("Complete all slots to run battles, or apply from Team Builder.")
+
+        run_label = f"Run {int(num_battles)} battles"
+        if st.button(run_label, type="primary", key="bs_run_battles"):
+            team_names, team_err = _gather_my_team()
+            if not team_names:
+                st.error(team_err or "Incomplete team.")
+            else:
+                rng = random.Random(int(seed_val))
+                my_rows = [df.loc[df["name"] == n].iloc[0] for n in team_names]
+                core4_cache: dict[str, list[str]] = {}
+                for r in my_rows:
+                    core4_cache[str(r["name"])] = recommended_four_moves(r)
+
+                wins = losses = ties = 0
+                battle_log: list[dict] = []
+                log_cap = min(25, max(5, int(num_battles) // 20))
+
+                bar = st.progress(0)
+                n_b = int(num_battles)
+                for b in range(n_b):
+                    opp_sample = opp_frame.sample(
+                        team_size, random_state=rng.randint(0, 10_000_000)
+                    )
+                    onames = opp_sample["name"].tolist()
+                    source = df_raw if opponent_pool == "Champions (full dex)" else df
+                    opp_rows = [source.loc[source["name"] == on].iloc[0] for on in onames]
+                    for r in opp_rows:
+                        nm = str(r["name"])
+                        if nm not in core4_cache:
+                            core4_cache[nm] = recommended_four_moves(r)
+
+                    my_pts, opp_pts, outcome = run_coverage_battle(
+                        my_rows,
+                        opp_rows,
+                        rng,
+                        num_turns=int(num_turns),
+                        move_pool=move_pool,
+                        scoring=scoring,
+                        core4_cache=core4_cache,
+                    )
+                    if outcome == "win":
+                        wins += 1
+                    elif outcome == "loss":
+                        losses += 1
+                    else:
+                        ties += 1
+
+                    if len(battle_log) < log_cap:
+                        battle_log.append(
+                            {
+                                "#": b + 1,
+                                "result": outcome.upper(),
+                                "you": round(my_pts, 2),
+                                "opp": round(opp_pts, 2),
+                                "they": ", ".join(str(x) for x in onames),
+                            }
+                        )
+
+                    bar.progress((b + 1) / n_b)
+                bar.empty()
+
+                win_rate = wins / n_b
+                lo, hi = wilson_score_interval(wins, n_b)
+                m1, m2, m3 = st.columns(3)
+                with m1:
+                    st.metric("Wins", wins)
+                with m2:
+                    st.metric("Losses", losses)
+                with m3:
+                    st.metric("Ties", ties)
+                st.metric(
+                    "Win rate",
+                    f"{100 * win_rate:.1f}%",
+                    help=f"Wilson 95% interval (wins only): {100 * lo:.1f}%–{100 * hi:.1f}%",
+                )
+                st.caption(
+                    f"{n_b} battles vs random **{pool_label}** **{team_size}v{team_size}** teams · "
+                    f"**{int(num_turns)}** turns/battle · seed **{int(seed_val)}** · "
+                    f"**{move_pool.split()[0]}** moves · "
+                    f"{'binary' if 'Binary' in scoring else 'weighted'} scoring."
+                )
+
+                with st.expander("Sample battle log (first battles in this run)"):
+                    st.dataframe(pd.DataFrame(battle_log), hide_index=True, use_container_width=True)
