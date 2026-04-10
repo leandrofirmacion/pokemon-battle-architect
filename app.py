@@ -1351,6 +1351,7 @@ def suggest_best_replacement_for_party(
     replace_idx: int,
     roster_df: pd.DataFrame,
     core4_cache: dict[str, list[str]],
+    used_replacement_names: set[str] | None = None,
 ) -> tuple[pd.Series | None, str]:
     """
     Choose best available replacement for one slot using team-composition heuristics.
@@ -1370,8 +1371,10 @@ def suggest_best_replacement_for_party(
 
     old_name = str(picks[replace_idx][1]["name"])
     candidates = roster_df[~roster_df["name"].astype(str).isin(base_names - {old_name})]
+    if used_replacement_names:
+        candidates = candidates[~candidates["name"].astype(str).isin(used_replacement_names)]
     if candidates.empty:
-        return (None, "No replacement candidates available in filtered roster.")
+        return (None, "No unused replacement candidates left for this party.")
 
     # Prefer fully evolved candidates when metadata is present and at least one exists.
     finals = candidates[candidates.apply(lambda r: _row_bool(r, "is_final_evolution", False), axis=1)]
@@ -1674,6 +1677,8 @@ with t3:
                     "format": "party_6",
                     "names": [str(prow["name"]) for _, prow in picks],
                 }
+                st.session_state["tb_replacement_used_names"] = []
+                st.session_state["tb_last_swap_added_name"] = ""
                 st.session_state["tb_last_roles"] = [role for role, _ in picks]
                 st.session_state["tb_last_names"] = [str(prow["name"]) for _, prow in picks]
 
@@ -1702,7 +1707,14 @@ with t3:
                 st.markdown("#### Current build")
             with hb2:
                 if st.button("Clear team", key="tb_clear_disp"):
-                    for k in ("tb_last_names", "tb_last_roles", "tb_core4", "last_built_team"):
+                    for k in (
+                        "tb_last_names",
+                        "tb_last_roles",
+                        "tb_core4",
+                        "last_built_team",
+                        "tb_replacement_used_names",
+                        "tb_last_swap_added_name",
+                    ):
                         st.session_state.pop(k, None)
                     st.rerun()
 
@@ -1993,11 +2005,13 @@ with t3:
                         else:
                             st.caption("No moves resolved (check network / PokeAPI).")
                         if st.button("Replace with best fit", key=f"tb_replace_{team_i}_{prow['name']}"):
+                            used_names = set(st.session_state.get("tb_replacement_used_names", []))
                             repl_row, repl_reason = suggest_best_replacement_for_party(
                                 picks=picks,
                                 replace_idx=team_i,
                                 roster_df=df,
                                 core4_cache=core4_by_name,
+                                used_replacement_names=used_names,
                             )
                             if repl_row is None:
                                 st.warning(repl_reason)
@@ -2020,6 +2034,9 @@ with t3:
                                 st.session_state["tb_last_swap_msg"] = (
                                     f"Replaced {prow['name']} -> {nm_new} ({repl_reason})."
                                 )
+                                used_names.add(nm_new)
+                                st.session_state["tb_replacement_used_names"] = sorted(used_names)
+                                st.session_state["tb_last_swap_added_name"] = nm_new
                                 st.rerun()
                         with st.expander("Why this Pokémon"):
                             st.markdown(_team_builder_insight(role, prow))
@@ -2036,11 +2053,25 @@ with t3:
                             "names": list(old_n),
                         }
                         st.session_state["tb_last_swap_msg"] = "Undo complete."
+                        added = str(st.session_state.get("tb_last_swap_added_name", "")).strip()
+                        if added:
+                            used = set(st.session_state.get("tb_replacement_used_names", []))
+                            if added in used:
+                                used.remove(added)
+                                st.session_state["tb_replacement_used_names"] = sorted(used)
+                        st.session_state["tb_last_swap_added_name"] = ""
                         st.rerun()
         except (KeyError, IndexError):
             st.caption("Regenerate the team after changing sidebar filters (saved names left the roster).")
             if st.button("Clear saved team", key="tb_clear_saved"):
-                for k in ("tb_last_names", "tb_last_roles", "tb_core4", "last_built_team"):
+                for k in (
+                    "tb_last_names",
+                    "tb_last_roles",
+                    "tb_core4",
+                    "last_built_team",
+                    "tb_replacement_used_names",
+                    "tb_last_swap_added_name",
+                ):
                     st.session_state.pop(k, None)
                 st.rerun()
 
