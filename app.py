@@ -280,6 +280,35 @@ with t2:
         with cols[i % 4]:
             st.button(str(mv), key=f"mv_{q}_{i}", disabled=True, use_container_width=True)
 
+
+def _team_builder_insight(role: str, row: pd.Series) -> str:
+    """Human-readable rationale tied to the meta-optimal role rules."""
+    if role.startswith("Speedster"):
+        return (
+            f"**Speed {int(row['speed'])}** beats the **>110** benchmark. That usually means you move first "
+            "in neutral matchups—better for picking off chipped targets, forcing Protect reads, and "
+            "controlling speed control (Tailwind / Trick Room) timing."
+        )
+    if role.startswith("Tank"):
+        hp, de = int(row["hp"]), int(row["defense"])
+        return (
+            f"**HP {hp}** and **Def {de}** satisfy the **>100 HP or Def** rule. This slot is your "
+            "**pivot**: it can take a strong neutral hit, reposition, or buy a turn while your "
+            "speedster or breaker finds an opening."
+        )
+    if role.startswith("Heavy"):
+        atk, spa = int(row["attack"]), int(row["sp_attack"])
+        return (
+            f"**Atk {atk}** / **Sp. Atk {spa}**—at least one side clears **>110**. That's your "
+            "**wallbreaker / closer** pressure: it punishes passive setups and helps crack typings "
+            "that stall your faster piece."
+        )
+    return (
+        "**Flex pick** drawn from the same filtered roster to complete six. Use it for **type coverage**, "
+        "a second win condition, or insurance if a lead plan gets disrupted."
+    )
+
+
 with t3:
     st.subheader("3v3 / 6v6")
     mode = st.radio("Format", ["3v3", "6v6"], horizontal=True)
@@ -299,29 +328,71 @@ with t3:
         if spd.empty or tnk.empty or hit.empty:
             st.error("Filtered roster too small for role pools.")
         else:
-            team: list[str] = []
+            picks: list[tuple[str, pd.Series]] = []
             if mode == "3v3":
-                team = [
-                    str(spd.sample(1, random_state=random.randint(0, 99999)).iloc[0]["name"]),
-                    str(tnk.sample(1, random_state=random.randint(0, 99999)).iloc[0]["name"]),
-                    str(hit.sample(1, random_state=random.randint(0, 99999)).iloc[0]["name"]),
+                rs1, rs2, rs3 = random.randint(0, 99999), random.randint(0, 99999), random.randint(0, 99999)
+                picks = [
+                    ("Speedster", spd.sample(1, random_state=rs1).iloc[0]),
+                    ("Tank", tnk.sample(1, random_state=rs2).iloc[0]),
+                    ("Heavy hitter", hit.sample(1, random_state=rs3).iloc[0]),
                 ]
             else:
                 rng = random.Random()
-                for fn in (pool_speedster, pool_tank, pool_hitter):
-                    sub = fn(p)
+                for pool_fn, base in (
+                    (pool_speedster, "Speedster"),
+                    (pool_tank, "Tank"),
+                    (pool_hitter, "Heavy hitter"),
+                ):
+                    sub = pool_fn(p)
                     k = min(2, len(sub))
-                    team.extend(sub.sample(k, random_state=rng.randint(0, 10_000_000))["name"].astype(str).tolist())
-                team = list(dict.fromkeys(team))
-                while len(team) < 6:
-                    rest = p[~p["name"].astype(str).isin(team)]
+                    sampled = sub.sample(k, random_state=rng.randint(0, 10_000_000))
+                    for j in range(len(sampled)):
+                        picks.append((f"{base} #{j + 1}", sampled.iloc[j]))
+                seen: set[str] = set()
+                deduped: list[tuple[str, pd.Series]] = []
+                for role, row in picks:
+                    nm = str(row["name"])
+                    if nm in seen:
+                        continue
+                    seen.add(nm)
+                    deduped.append((role, row))
+                picks = deduped
+                while len(picks) < 6:
+                    rest = p[~p["name"].astype(str).isin(seen)]
                     if rest.empty:
                         break
-                    team.append(str(rest.sample(1, random_state=rng.randint(0, 10_000_000)).iloc[0]["name"]))
-                team = team[:6]
+                    row = rest.sample(1, random_state=rng.randint(0, 10_000_000)).iloc[0]
+                    nm = str(row["name"])
+                    seen.add(nm)
+                    picks.append(("Flex", row))
+                picks = picks[:6]
+
             st.success("Suggested team")
-            for n in team:
-                st.write(f"· **{n}**")
+            st.markdown("#### Why this recommendation")
+            st.info(
+                "The builder **randomly samples** from your **sidebar-filtered** roster using three "
+                "**archetype bands**: **Speedster** (Speed > 110), **Tank** (HP or Def > 100), and "
+                "**Heavy hitter** (Atk or Sp. Atk > 110). Together they target **tempo**, **durability**, "
+                "and **wallbreaking**—a compact checklist for short games. "
+                + (
+                    "In **6v6**, you get up to **two** picks per band when possible, then **Flex** slots to reach six."
+                    if mode == "6v6"
+                    else ""
+                )
+            )
+
+            ncols = 3
+            for row_start in range(0, len(picks), ncols):
+                row_slice = picks[row_start : row_start + ncols]
+                cols = st.columns(ncols)
+                for col, (role, prow) in zip(cols, row_slice):
+                    with col:
+                        if pd.notna(prow.get("image_url")):
+                            st.image(str(prow["image_url"]), use_container_width=True)
+                        st.markdown(f"**{prow['name']}**")
+                        st.caption(role)
+                        with st.expander("Why this Pokémon"):
+                            st.markdown(_team_builder_insight(role, prow))
 
 with t4:
     st.subheader("Monte Carlo — vs Random Champions tier")
