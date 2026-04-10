@@ -1107,10 +1107,10 @@ if df.empty:
 
 champs = df_raw[df_raw["game_source"].astype(str).str.contains("Champions", case=False, na=False)]
 
-t1, t2, t3, t4 = st.tabs(["DEX Analyzer", "Movepool Inspector", "Team Builder", "Battle Simulator"])
+t1, t2, t3, t4 = st.tabs(["Pokemon", "Movepool Inspector", "Team Builder", "Battle Simulator"])
 
 with t1:
-    st.subheader("The Ledger")
+    st.subheader("Pokedex")
     search = st.text_input("Search roster", placeholder="Filter by name…")
 
     show = df.copy()
