@@ -169,6 +169,15 @@ def type_badge_html(t: str) -> str:
     )
 
 
+def _type_cell_style(type_name: str) -> str:
+    t = str(type_name or "").strip().lower()
+    bg = TYPE_COLORS.get(t, "#888888")
+    # Lighter types need dark text for readability.
+    dark_text_types = {"electric", "ice", "fairy", "normal", "ground", "steel"}
+    fg = "#111111" if t in dark_text_types else "#ffffff"
+    return f"background-color: {bg}; color: {fg}; font-weight: 600;"
+
+
 POKEAPI_MOVE = "https://pokeapi.co/api/v2/move"
 
 
@@ -1228,15 +1237,21 @@ with t2:
         st.metric("Status", int(move_profile["status_count"]))
     with mp4:
         st.metric("Class balance", f"{move_profile['offense_class_balance']:.2f}")
-    cols = st.columns(4)
-    for i, mv in enumerate(moves):
-        with cols[i % 4]:
-            det = move_pokeapi_details(str(mv))
-            dc = ((det or {}).get("damage_class") or "status").title()
-            pw = (det or {}).get("power")
-            pw_txt = str(int(pw)) if pw is not None and int(pw) > 0 else "—"
-            st.caption(f"{dc} · Pow {pw_txt}")
-            st.button(str(mv), key=f"mv_{q}_{i}", disabled=True, use_container_width=True)
+    rows = []
+    for mv in moves:
+        det = move_pokeapi_details(str(mv))
+        mtype = ((det or {}).get("type") or "—").title()
+        dc = ((det or {}).get("damage_class") or "status").title()
+        pw = (det or {}).get("power")
+        pw_txt = int(pw) if pw is not None and int(pw) > 0 else "—"
+        rows.append({"Move": str(mv), "Type": mtype, "Class": dc, "Power": pw_txt})
+    move_df = pd.DataFrame(rows)
+    if not move_df.empty:
+        st.caption("Color code: **Type** column background")
+        sty = move_df.style.map(_type_cell_style, subset=["Type"])
+        st.dataframe(sty, hide_index=True, use_container_width=True)
+    else:
+        st.caption("No moves found for this Pokémon.")
 
 
 def _team_builder_insight(role: str, row: pd.Series) -> str:
