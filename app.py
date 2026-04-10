@@ -1608,6 +1608,7 @@ with t3:
                         if pd.notna(prow.get("image_url")):
                             st.image(str(prow["image_url"]), use_container_width=True)
                         st.markdown(f"**{prow['name']}**")
+                        st.caption(format_types_for_display(prow.get("types")))
                         st.caption(role)
                         core4 = core4_by_name.get(str(prow["name"]), [])
                         st.markdown("**Suggested 4 moves**")
