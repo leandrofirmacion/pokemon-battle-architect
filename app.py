@@ -953,13 +953,6 @@ with st.sidebar:
     st.header("Global filter")
     st.selectbox("Mode preset", options=list(MODE_PRESETS), key="ui_mode_preset")
     st.button("Apply preset", key="ui_mode_apply", on_click=_apply_mode_preset)
-    game_pick = st.multiselect(
-        "Game version",
-        options=["Champions", "Legends Z-A"],
-        default=["Champions", "Legends Z-A"],
-        key="side_game_pick",
-        help="Rows where game_source contains the selected label.",
-    )
     type_pick = st.multiselect(
         "Type",
         options=[t.title() for t in TYPE_FILTER_ORDER],
@@ -974,13 +967,21 @@ with st.sidebar:
         key="side_mega_pick",
         help="Filter by Mega Evolution rows (is_mega).",
     )
-    game_type_pick = st.selectbox(
-        "Game type",
-        options=["Any", "Champions only", "Legends Z-A only", "Both games"],
-        index=0,
-        key="side_game_type_pick",
-        help="Refine by how game_source tags Champions vs Legends Z-A (exclusive or both).",
-    )
+    with st.expander("Advanced filters", expanded=False):
+        game_pick = st.multiselect(
+            "Game version",
+            options=["Champions", "Legends Z-A"],
+            default=["Champions", "Legends Z-A"],
+            key="side_game_pick",
+            help="Rows where game_source contains the selected label.",
+        )
+        game_type_pick = st.selectbox(
+            "Game type",
+            options=["Any", "Champions only", "Legends Z-A only", "Both games"],
+            index=0,
+            key="side_game_type_pick",
+            help="Refine by how game_source tags Champions vs Legends Z-A (exclusive or both).",
+        )
 
 
 df_base = filter_by_games(df_raw, game_pick)
