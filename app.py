@@ -179,6 +179,7 @@ def _type_cell_style(type_name: str) -> str:
 
 
 POKEAPI_MOVE = "https://pokeapi.co/api/v2/move"
+MOVE_META_PRELOADED: dict[str, dict] = {}
 
 
 def _move_name_to_slug(move_name: str) -> str:
@@ -194,16 +195,34 @@ def move_pokeapi_details(move_name: str) -> dict | None:
     slug = _move_name_to_slug(move_name)
     if not slug:
         return None
+    pre = MOVE_META_PRELOADED.get(slug)
+    if pre:
+        return pre
     try:
         r = requests.get(f"{POKEAPI_MOVE}/{slug}", timeout=8)
         if r.status_code != 200:
             return None
         d = r.json()
         dc = d.get("damage_class") or {}
+        meta = d.get("meta") or {}
+        eff = ""
+        for ent in d.get("effect_entries") or []:
+            if ((ent.get("language") or {}).get("name") or "").lower() == "en":
+                eff = str(ent.get("short_effect") or ent.get("effect") or "").strip()
+                break
         return {
             "type": (d.get("type") or {}).get("name"),
             "power": d.get("power"),
+            "pp": d.get("pp"),
+            "accuracy": d.get("accuracy"),
+            "priority": int(d.get("priority") or 0),
             "damage_class": dc.get("name") if isinstance(dc, dict) else None,
+            "ailment": ((meta.get("ailment") or {}).get("name") if isinstance(meta, dict) else None),
+            "stat_changes": [
+                {"stat": ((sc.get("stat") or {}).get("name") or ""), "change": int(sc.get("change") or 0)}
+                for sc in (d.get("stat_changes") or [])
+            ],
+            "effect_text": eff,
             "name": d.get("name"),
         }
     except requests.RequestException:
@@ -979,6 +998,30 @@ for _bcol in ("is_final_evolution", "is_split_evolution_family", "is_regional_fo
 for _scol in ("base_species", "evolution_family_id", "branch_key", "regional_group", "final_evolution_options"):
     if _scol not in df_raw.columns:
         df_raw[_scol] = "" if _scol != "final_evolution_options" else "[]"
+if "move_meta_map" not in df_raw.columns:
+    df_raw["move_meta_map"] = "{}"
+_preloaded_meta: dict[str, dict] = {}
+for _raw_map in df_raw["move_meta_map"].tolist():
+    parsed = parse_list_cell(_raw_map)
+    if isinstance(parsed, dict):
+        for k, v in parsed.items():
+            sk = _move_name_to_slug(str(k))
+            if not sk or not isinstance(v, dict):
+                continue
+            if sk not in _preloaded_meta:
+                _preloaded_meta[sk] = {
+                    "type": v.get("type"),
+                    "power": v.get("power"),
+                    "pp": v.get("pp"),
+                    "accuracy": v.get("accuracy"),
+                    "priority": int(v.get("priority") or 0),
+                    "damage_class": v.get("damage_class"),
+                    "ailment": v.get("ailment"),
+                    "stat_changes": v.get("stat_changes") if isinstance(v.get("stat_changes"), list) else [],
+                    "effect_text": str(v.get("effect_text") or ""),
+                    "name": v.get("name") or sk,
+                }
+MOVE_META_PRELOADED = _preloaded_meta
 
 
 def filter_by_games(frame: pd.DataFrame, versions: list[str]) -> pd.DataFrame:
@@ -1266,7 +1309,24 @@ with t2:
         dc = ((det or {}).get("damage_class") or "status").title()
         pw = (det or {}).get("power")
         pw_txt = int(pw) if pw is not None and int(pw) > 0 else "—"
-        rows.append({"Move": str(mv), "Type": mtype, "Class": dc, "Power": pw_txt})
+        acc = (det or {}).get("accuracy")
+        pp = (det or {}).get("pp")
+        pr = (det or {}).get("priority")
+        ail = ((det or {}).get("ailment") or "—")
+        eff = str((det or {}).get("effect_text") or "")
+        rows.append(
+            {
+                "Move": str(mv),
+                "Type": mtype,
+                "Class": dc,
+                "Power": pw_txt,
+                "Acc": acc if acc is not None else "—",
+                "PP": pp if pp is not None else "—",
+                "Prio": int(pr) if pr is not None else 0,
+                "Ailment": str(ail).replace("-", " ").title(),
+                "Effect": (eff[:80] + "…") if len(eff) > 81 else (eff or "—"),
+            }
+        )
     move_df = pd.DataFrame(rows)
     if not move_df.empty:
         st.caption("Color code: **Type** column background")
