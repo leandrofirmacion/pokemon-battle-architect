@@ -315,14 +315,17 @@ LEDGER_HIDDEN_COLS = frozenset({"all_moves", "national_dex_hint", "pokemon_id"})
 
 
 def ledger_column_order(columns: list[str]) -> list[str]:
-    """Place pokeapi_id immediately left of name; keep other columns in original order."""
-    cols = list(columns)
+    """
+    Leading columns: PokéAPI id, name, art (image_url), Moveset; then the rest in source order.
+    """
+    cols_list = list(columns)
+    colset = set(cols_list)
+    preferred = ("pokeapi_id", "name", "image_url", "Moveset")
     ordered: list[str] = []
-    if "pokeapi_id" in cols:
-        ordered.append("pokeapi_id")
-    if "name" in cols:
-        ordered.append("name")
-    for c in cols:
+    for p in preferred:
+        if p in colset:
+            ordered.append(p)
+    for c in cols_list:
         if c not in ordered:
             ordered.append(c)
     return ordered
@@ -571,6 +574,14 @@ with t1:
     if search.strip():
         show = show[show["name"].astype(str).str.contains(search.strip(), case=False, na=False)]
 
+    if not show.empty and "pokeapi_id" in show.columns:
+        show = show.sort_values(
+            by="pokeapi_id",
+            ascending=True,
+            na_position="last",
+            kind="mergesort",
+        ).reset_index(drop=True)
+
     if show.empty:
         st.info("No Pokémon match this search.")
     else:
@@ -619,7 +630,7 @@ with t1:
             st.session_state["ledger_sb"] = str(show.iloc[ridx]["name"])
 
         st.caption(
-            "Click a **row** in the table to sync the detail panel (deselect the row to use only the dropdown). "
+            "Sorted by **PokéAPI id** (ascending). Click a **row** to sync the detail panel (deselect the row to use only the dropdown). "
             "**Moveset** = top 4 moves by the same heuristic as Team Builder."
         )
         pick = st.selectbox("Select Pokémon for detail", options=names, key="ledger_sb")
