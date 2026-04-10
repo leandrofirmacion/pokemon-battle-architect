@@ -638,6 +638,70 @@ def run_coverage_battle(
     return (my_pts, opp_pts, "tie")
 
 
+PARTY_SUBSET_OFF = "off"
+PARTY_SUBSET_RANDOM = "random"
+PARTY_SUBSET_ORACLE = "oracle"
+
+
+def run_coverage_battle_party(
+    my_party: list[pd.Series],
+    opp_rows: list[pd.Series],
+    rng: random.Random,
+    *,
+    battle_size: int,
+    party_subset: str,
+    num_turns: int,
+    move_pool: str,
+    scoring: str,
+    core4_cache: dict[str, list[str]],
+) -> tuple[float, float, str]:
+    """
+    Ranked is always battle_size=3. my_party is either three active Pokémon (party_subset off)
+    or a six-Pokémon box when party_subset is random/oracle (pick three per battle).
+    """
+    battle_size = int(battle_size)
+    if len(opp_rows) != battle_size:
+        raise ValueError("Opponent team size must match battle_size.")
+    if party_subset in (PARTY_SUBSET_RANDOM, PARTY_SUBSET_ORACLE):
+        if len(my_party) != 6 or battle_size != 3:
+            raise ValueError("Party subset modes require six Pokémon and 3v3 battles.")
+        if party_subset == PARTY_SUBSET_RANDOM:
+            trio_sets: list[list[pd.Series]] = [
+                [my_party[i] for i in rng.sample(range(6), 3)]
+            ]
+        else:
+            trio_sets = [
+                [my_party[i] for i in comb]
+                for comb in itertools.combinations(range(6), 3)
+            ]
+    else:
+        if len(my_party) != battle_size:
+            raise ValueError("Active team must have the same size as the battle (three for ranked).")
+        trio_sets = [my_party]
+
+    rank = {"win": 2, "tie": 1, "loss": 0}
+    best_pr = -1
+    best_margin = float("-inf")
+    best_mp = best_op = 0.0
+    best_oc = "loss"
+    for trio in trio_sets:
+        mp, op, oc = run_coverage_battle(
+            trio,
+            opp_rows,
+            rng,
+            num_turns=num_turns,
+            move_pool=move_pool,
+            scoring=scoring,
+            core4_cache=core4_cache,
+        )
+        pr = rank[oc]
+        margin = mp - op
+        if pr > best_pr or (pr == best_pr and margin > best_margin):
+            best_pr, best_margin = pr, margin
+            best_mp, best_op, best_oc = mp, op, oc
+    return (best_mp, best_op, best_oc)
+
+
 def estimate_win_rate(
     my_rows: list[pd.Series],
     opp_frame: pd.DataFrame,
@@ -651,10 +715,12 @@ def estimate_win_rate(
     move_pool: str,
     scoring: str,
     rng: random.Random,
+    party_subset: str = PARTY_SUBSET_OFF,
 ) -> tuple[int, int, int]:
     """
     Run n_battles Monte Carlo matches vs random opponents from opp_frame.
-    Returns (wins, losses, ties). Mutates no Streamlit state.
+    Ranked uses team_size=3. If party_subset is random/oracle, my_rows must be six Pokémon
+    (box); each match is still 3v3. Returns (wins, losses, ties). Mutates no Streamlit state.
     """
     source = df_raw_data if opponent_champions_full_dex else df_roster
     core4_cache: dict[str, list[str]] = {}
@@ -671,10 +737,12 @@ def estimate_win_rate(
             if nm not in core4_cache:
                 core4_cache[nm] = recommended_four_moves(r)
 
-        _my_pts, _opp_pts, outcome = run_coverage_battle(
+        _my_pts, _opp_pts, outcome = run_coverage_battle_party(
             my_rows,
             opp_rows,
             rng,
+            battle_size=team_size,
+            party_subset=party_subset,
             num_turns=num_turns,
             move_pool=move_pool,
             scoring=scoring,
@@ -688,6 +756,73 @@ def estimate_win_rate(
             ties += 1
 
     return wins, losses, ties
+
+
+def score_party_trios_paired(
+    party_rows: list[pd.Series],
+    opp_frame: pd.DataFrame,
+    *,
+    opponent_champions_full_dex: bool,
+    df_roster: pd.DataFrame,
+    df_raw_data: pd.DataFrame,
+    n_rounds: int,
+    num_turns: int,
+    move_pool: str,
+    scoring: str,
+    rng: random.Random,
+) -> list[tuple[str, int, int, int]]:
+    """
+    Rank all C(6,3) trios in a six-Pokémon box. Each round samples one random opponent team; every trio
+    plays that same opponent, so win totals are paired and comparable. Returns rows sorted best-first:
+    (trio label, wins, losses, ties).
+    """
+    if len(party_rows) != 6:
+        raise ValueError("score_party_trios_paired requires exactly six Pokémon.")
+    source = df_raw_data if opponent_champions_full_dex else df_roster
+    trios: list[list[pd.Series]] = []
+    labels: list[str] = []
+    for idx in itertools.combinations(range(6), 3):
+        rows3 = [party_rows[i] for i in idx]
+        trios.append(rows3)
+        labels.append(" / ".join(sorted(str(r["name"]) for r in rows3)))
+
+    core4_cache: dict[str, list[str]] = {}
+    for r in party_rows:
+        core4_cache[str(r["name"])] = recommended_four_moves(r)
+
+    wins = [0] * len(trios)
+    losses = [0] * len(trios)
+    ties_c = [0] * len(trios)
+
+    for _ in range(n_rounds):
+        opp_sample = opp_frame.sample(3, random_state=rng.randint(0, 10_000_000))
+        onames = opp_sample["name"].tolist()
+        opp_rows = [source.loc[source["name"] == on].iloc[0] for on in onames]
+        for r in opp_rows:
+            nm = str(r["name"])
+            if nm not in core4_cache:
+                core4_cache[nm] = recommended_four_moves(r)
+
+        for ti, trio in enumerate(trios):
+            _mp, _op, outcome = run_coverage_battle(
+                trio,
+                opp_rows,
+                rng,
+                num_turns=num_turns,
+                move_pool=move_pool,
+                scoring=scoring,
+                core4_cache=core4_cache,
+            )
+            if outcome == "win":
+                wins[ti] += 1
+            elif outcome == "loss":
+                losses[ti] += 1
+            else:
+                ties_c[ti] += 1
+
+    ranked = list(zip(labels, wins, losses, ties_c))
+    ranked.sort(key=lambda row: (-row[1], row[2], -row[3]))
+    return ranked
 
 
 st.set_page_config(page_title="Pokemon 2026 Macdro", layout="wide", initial_sidebar_state="expanded")
@@ -1132,13 +1267,13 @@ def render_team_builder_summary(picks: list[tuple[str, pd.Series]], core4_by_nam
 with t3:
     st.subheader("Team Builder — role bands + random")
     st.caption(
-        "Random samples from **Speedster / Tank / Heavy hitter** pools on your **sidebar-filtered** roster. "
-        "Tune thresholds and **seed** to explore; constraints optionally **retry** sampling. "
-        "Not a tournament export—**core 4** moves use the same **PokeAPI** heuristic as elsewhere."
+        "Builds a **six-Pokémon party** for ranked play (Champions / Legends Z-A): you bring **three** in "
+        "each ladder match. Random samples from **Speedster / Tank / Heavy hitter** pools on your "
+        "**sidebar-filtered** roster. Tune thresholds and **seed** to explore; constraints optionally **retry** "
+        "sampling. **Core 4** moves use the same **PokeAPI** heuristic as elsewhere."
     )
 
-    mode = st.radio("Format", ["3v3", "6v6"], horizontal=True, key="tb_format")
-    team_size = 3 if mode == "3v3" else 6
+    tb_party_size = 6
     tb_opts = sorted(df["name"].astype(str).unique().tolist())
 
     sg1, sg2 = st.columns([2, 1])
@@ -1178,10 +1313,10 @@ with t3:
     )
 
     tb_pins = st.multiselect(
-        "Pin Pokémon (always on the team if in the filtered roster; max = format size)",
+        "Pin Pokémon (always on the party if in the filtered roster; max six)",
         options=tb_opts,
         default=[],
-        max_selections=team_size,
+        max_selections=tb_party_size,
         key="tb_pins_sel",
         help="Filled slots skip random picks for those Pokémon; remaining slots use role bands.",
     )
@@ -1199,7 +1334,7 @@ with t3:
                 try_rng = random.Random(int(tb_seed) + attempt * 7919)
                 cand = generate_role_band_team(
                     p,
-                    mode,
+                    "6v6",
                     try_rng,
                     int(thr_speed),
                     int(thr_bulk),
@@ -1223,7 +1358,7 @@ with t3:
                 )
             else:
                 st.session_state["last_built_team"] = {
-                    "format": mode,
+                    "format": "party_6",
                     "names": [str(prow["name"]) for _, prow in picks],
                 }
                 st.session_state["tb_last_roles"] = [role for role, _ in picks]
@@ -1269,8 +1404,9 @@ with t3:
 
             with st.expander("Quick simulator — win rate vs random opponents", expanded=False):
                 st.caption(
-                    "Same toy model as **Battle Simulator** (not cartridge/Showdown). Uses **Champions** or "
-                    "**filtered** pool below; many battles ⇒ more **PokeAPI** use unless cached."
+                    "Ranked is always **3v3**. With a **six-Pokémon** party, choose how the simulator picks "
+                    "your three each match. Same toy model as **Battle Simulator** (not cartridge/Showdown). "
+                    "**Oracle** runs up to **20** trio simulations per battle (all C(6,3))."
                 )
                 q1, q2 = st.columns(2)
                 with q1:
@@ -1302,6 +1438,32 @@ with t3:
                     index=0,
                     key="tb_quick_moves",
                 )
+                n_party = len(picks)
+                tb_party_subset = PARTY_SUBSET_OFF
+                if n_party == 6:
+                    tb_q_party = st.selectbox(
+                        "Six-Pokémon party: how to pick your 3 each match",
+                        options=[
+                            "Random 3 from box each battle",
+                            "Oracle — best of 20 trios vs that opponent",
+                        ],
+                        index=0,
+                        key="tb_quick_party",
+                    )
+                    tb_party_subset = (
+                        PARTY_SUBSET_ORACLE
+                        if "Oracle" in tb_q_party
+                        else PARTY_SUBSET_RANDOM
+                    )
+                else:
+                    if n_party == 3:
+                        st.caption(
+                            "This build has **three** Pokémon (legacy save): scored as a fixed **3v3** team."
+                        )
+                    elif n_party not in (3, 6):
+                        st.warning(
+                            "Expected **six** (party) or **three** (fixed team) Pokémon for ranked quick sim."
+                        )
                 st.markdown("**Scoring**")
                 tb_q_score_pick = st.radio(
                     "Quick sim scoring",
@@ -1315,9 +1477,13 @@ with t3:
 
                 if st.button("Run quick win-rate estimate", key="tb_quick_run"):
                     opp_f = champs if tb_q_opp == "Champions (full dex)" else df
-                    tsz = len(picks)
-                    if opp_f.empty or len(opp_f) < tsz:
-                        st.warning("Opponent pool too small for this format.")
+                    ranked_size = 3
+                    if opp_f.empty or len(opp_f) < ranked_size:
+                        st.warning("Opponent pool too small for ranked 3v3.")
+                    elif n_party not in (3, 6):
+                        st.warning("Regenerate a six-Pokémon party (or use a three-Pokémon legacy team).")
+                    elif n_party == 6 and len({str(pr["name"]) for _, pr in picks}) < 6:
+                        st.warning("Party must have **six distinct** Pokémon.")
                     else:
                         my_rows = [pr for _, pr in picks]
                         rng_q = random.Random(int(tb_seed) + 31337)
@@ -1327,12 +1493,13 @@ with t3:
                             opponent_champions_full_dex=(tb_q_opp == "Champions (full dex)"),
                             df_roster=df,
                             df_raw_data=df_raw,
-                            team_size=tsz,
+                            team_size=ranked_size,
                             n_battles=int(tb_q_bpt),
                             num_turns=int(tb_q_turns),
                             move_pool=tb_q_moves,
                             scoring=tb_q_scoring,
                             rng=rng_q,
+                            party_subset=tb_party_subset if n_party == 6 else PARTY_SUBSET_OFF,
                         )
                         nb = int(tb_q_bpt)
                         wr = w / nb
@@ -1343,6 +1510,93 @@ with t3:
                             f"{100 * wr:.1f}%",
                             help=f"Wilson 95% (wins): {100 * lo:.1f}%–{100 * hi:.1f}%",
                         )
+
+            with st.expander("Best trio in this box (paired rounds)", expanded=False):
+                st.caption(
+                    "Ranks all **20** trios from your six-Pokémon party. Each **round** uses **one** random "
+                    "opponent team; every trio faces that same team so the leaderboard is **apples-to-apples** "
+                    "inside the box. Reuses **opponent pool**, **turns**, **moves**, and **scoring** from "
+                    "**Quick simulator** above."
+                )
+                if n_party != 6:
+                    st.info("Generate a **six-Pokémon** party to rank trios here.")
+                elif len({str(pr["name"]) for _, pr in picks}) < 6:
+                    st.warning("Party must have **six distinct** Pokémon.")
+                else:
+                    br1, br2 = st.columns(2)
+                    with br1:
+                        tb_box_rounds = st.number_input(
+                            "Rounds",
+                            min_value=8,
+                            max_value=400,
+                            value=48,
+                            step=4,
+                            key="tb_box_trios_rounds",
+                            help="Each round = 20 trio vs same opponent battles.",
+                        )
+                    with br2:
+                        tb_box_topn = st.number_input(
+                            "Show top N trios",
+                            min_value=3,
+                            max_value=20,
+                            value=8,
+                            step=1,
+                            key="tb_box_trios_topn",
+                        )
+                    if st.button("Rank trios in this party", key="tb_box_trios_run"):
+                        opp_fb = champs if tb_q_opp == "Champions (full dex)" else df
+                        if opp_fb.empty or len(opp_fb) < 3:
+                            st.warning("Opponent pool too small for 3v3.")
+                        else:
+                            party_rows_tb = [pr for _, pr in picks]
+                            rng_tb = random.Random(int(tb_seed) + 90001)
+                            with st.spinner(
+                                f"**{int(tb_box_rounds)}** rounds × **20** trios vs same opponent each round…"
+                            ):
+                                ranked_tb = score_party_trios_paired(
+                                    party_rows_tb,
+                                    opp_fb,
+                                    opponent_champions_full_dex=(
+                                        tb_q_opp == "Champions (full dex)"
+                                    ),
+                                    df_roster=df,
+                                    df_raw_data=df_raw,
+                                    n_rounds=int(tb_box_rounds),
+                                    num_turns=int(tb_q_turns),
+                                    move_pool=tb_q_moves,
+                                    scoring=tb_q_scoring,
+                                    rng=rng_tb,
+                                )
+                            best = ranked_tb[0]
+                            nbtr = int(tb_box_rounds)
+                            wr_b = best[1] / nbtr
+                            lo_b, hi_b = wilson_score_interval(best[1], nbtr)
+                            st.success(
+                                f"**Best trio:** {best[0]} — **{best[1]}**W / **{best[2]}**L / **{best[3]}**T "
+                                f"over **{nbtr}** paired rounds"
+                            )
+                            st.metric(
+                                "Best trio win rate",
+                                f"{100 * wr_b:.1f}%",
+                                help=f"Wilson 95% (wins): {100 * lo_b:.1f}%–{100 * hi_b:.1f}%",
+                            )
+                            topn = min(int(tb_box_topn), len(ranked_tb))
+                            rows_df = []
+                            for lab, wv, lv, tv in ranked_tb[:topn]:
+                                rows_df.append(
+                                    {
+                                        "Trio": lab,
+                                        "W": wv,
+                                        "L": lv,
+                                        "T": tv,
+                                        "Win %": round(100 * wv / nbtr, 1),
+                                    }
+                                )
+                            st.dataframe(
+                                pd.DataFrame(rows_df),
+                                hide_index=True,
+                                use_container_width=True,
+                            )
 
             st.markdown("#### Roster cards")
             ncols = 3
@@ -1416,10 +1670,11 @@ with t3:
 with t4:
     st.subheader("Monte Carlo — coverage simulator")
     st.caption(
-        "Each **turn** picks a random slot on both teams (3v3 or 6v6). **Standard Coverage** and **Max Damage** "
-        "use only type effectiveness (PokeAPI move types, **cached 24h**). **Competitive EV/IV** adds **Lv 50** stats with "
-        "**31 IV**, **252 / 252 / 4** EVs, **Timid** (special) or **Jolly** (physical), then a **damage stub** "
-        "(STAB + type chart) scaled by **Speed** (+5% faster, −5% slower)."
+        "Ranked (Champions / Legends Z-A) is **3v3** only. Build a **six-Pokémon party** here or in Team Builder, "
+        "then score how often a **random or oracle** trio wins vs random opponents. Each **turn** picks a random "
+        "active slot on both teams. **Standard Coverage** and **Max Damage** use type effectiveness (PokeAPI, "
+        "**cached 24h**). **Competitive EV/IV** uses **Lv 50** stats with **31 IV**, **252 / 252 / 4** EVs, "
+        "**Timid**/**Jolly**, then a **damage stub** scaled by **Speed** (+5% / −5%)."
     )
 
     c_opt1, c_opt2 = st.columns(2)
@@ -1428,7 +1683,7 @@ with t4:
             "Opponent pool",
             options=["Champions (full dex)", "Sidebar-filtered roster"],
             index=0,
-            help="Where random opposing teams are sampled from (same size as your format).",
+            help="Random opposing **3-Pokémon** teams for ranked 3v3.",
         )
     with c_opt2:
         move_pool = st.selectbox(
@@ -1461,16 +1716,37 @@ with t4:
     opp_frame = champs if opponent_pool == "Champions (full dex)" else df
     pool_label = "Champions" if opponent_pool == "Champions (full dex)" else "filtered roster"
 
-    bs_format = st.radio("Your format", ["3v3", "6v6"], horizontal=True, key="bs_format")
-    team_size = 3 if bs_format == "3v3" else 6
+    ranked_battle_size = 3
+
+    bs_roster_mode = st.radio(
+        "Your roster",
+        ["Active 3 (ranked ladder)", "Party box (6 Pokémon)"],
+        horizontal=True,
+        key="bs_roster_mode",
+        help="Ladder uses three Pokémon per match. Party mode keeps six in the box and picks three each battle.",
+    )
+    bs_party_subset_ui = PARTY_SUBSET_OFF
+    if bs_roster_mode == "Party box (6 Pokémon)":
+        bs_party_pick = st.selectbox(
+            "How to pick your three each battle",
+            options=[
+                "Random 3 from box each battle",
+                "Oracle — best of 20 trios vs that opponent",
+            ],
+            key="bs_party_subset_pick",
+        )
+        bs_party_subset_ui = (
+            PARTY_SUBSET_ORACLE if "Oracle" in bs_party_pick else PARTY_SUBSET_RANDOM
+        )
 
     for _i in range(6):
         if f"bs_dd_{_i}" not in st.session_state:
             st.session_state[f"bs_dd_{_i}"] = "—"
 
-    if opp_frame.empty or len(opp_frame) < team_size:
+    if opp_frame.empty or len(opp_frame) < ranked_battle_size:
         st.warning(
-            f"Opponent pool ({pool_label}) needs at least **{team_size}** Pokémon; adjust filters or CSV."
+            f"Opponent pool ({pool_label}) needs at least **{ranked_battle_size}** Pokémon for ranked 3v3; "
+            "adjust filters or CSV."
         )
     else:
         my_opts = sorted(df["name"].astype(str).unique().tolist())
@@ -1481,41 +1757,30 @@ with t4:
         tb = st.session_state.get("last_built_team")
         if tb and tb.get("names"):
             st.caption(
-                f"Last Team Builder team ({tb.get('format', '?')}): **{', '.join(tb['names'])}**"
+                f"Last Team Builder party ({tb.get('format', '?')}): **{', '.join(tb['names'])}**"
             )
         else:
             st.caption(
-                "Use **Team Builder → Generate Meta-Optimal Team**, then **Apply last Team Builder team** here."
+                "Use **Team Builder → Generate team (role bands + random)**, then **Apply last Team Builder team** here."
             )
 
         if st.button("Apply last Team Builder team", key="bs_apply_tb"):
             if not tb or not tb.get("names"):
-                st.warning("Open **Team Builder** and click **Generate Meta-Optimal Team** first.")
+                st.warning("Open **Team Builder** and generate a party first.")
             else:
                 nms = list(tb["names"])
-                if len(nms) >= 6 and team_size == 3:
-                    st.info(
-                        "Team Builder has 6 Pokémon; using the **first 3**. Switch to **6v6** for the full roster."
-                    )
-                elif len(nms) < team_size:
-                    st.warning(
-                        f"Team Builder only has **{len(nms)}** Pokémon; fill remaining slots manually."
-                    )
-                st.session_state["bs_dd_0"] = nms[0] if nms and nms[0] in my_opts else blank
-                for i in range(1, 6):
-                    if i < team_size:
-                        if i < len(nms):
-                            pick = nms[i]
-                            st.session_state[f"bs_dd_{i}"] = pick if pick in my_opts else blank
-                        else:
-                            st.session_state[f"bs_dd_{i}"] = blank
+                for i in range(6):
+                    if i < len(nms) and nms[i] in my_opts:
+                        st.session_state[f"bs_dd_{i}"] = nms[i]
                     else:
                         st.session_state[f"bs_dd_{i}"] = blank
                 st.rerun()
 
-        for i in range(team_size):
+        slot_count = 6 if bs_roster_mode == "Party box (6 Pokémon)" else 3
+        for i in range(slot_count):
+            label = f"Pokémon {i + 1}" if slot_count == 3 else f"Party slot {i + 1}"
             st.selectbox(
-                f"Pokémon {i + 1}",
+                label,
                 options=sel_opts,
                 key=f"bs_dd_{i}",
                 help="Filtered sidebar roster.",
@@ -1523,10 +1788,101 @@ with t4:
 
         opponent_champions_full = opponent_pool == "Champions (full dex)"
 
+        with st.expander("Best trio in this box (paired rounds)", expanded=False):
+            st.caption(
+                "Ranks all **20** trios from your **six-Pokémon** party. Each **round** samples **one** random "
+                "3v3 opponent; every trio faces that same team—fair comparison **within the box** only. Uses "
+                "**turns**, **moves**, and **scoring** from this tab."
+            )
+            bx1, bx2 = st.columns(2)
+            with bx1:
+                bs_box_rounds = st.number_input(
+                    "Rounds",
+                    min_value=8,
+                    max_value=400,
+                    value=48,
+                    step=4,
+                    key="bs_box_trios_rounds",
+                    help="Each round runs 20 battles (one per trio) vs the same opponent.",
+                )
+            with bx2:
+                bs_box_topn = st.number_input(
+                    "Show top N trios",
+                    min_value=3,
+                    max_value=20,
+                    value=8,
+                    step=1,
+                    key="bs_box_trios_topn",
+                )
+            if bs_roster_mode != "Party box (6 Pokémon)":
+                st.info("Switch to **Party box (6 Pokémon)** and fill six distinct slots.")
+            elif st.button("Rank trios in this party", type="secondary", key="bs_box_trios_run"):
+                bn: list[str] = []
+                bad = False
+                for i in range(6):
+                    sel = st.session_state.get(f"bs_dd_{i}", blank)
+                    if not sel or sel == blank:
+                        st.error(f"Party slot **{i + 1}** is empty.")
+                        bad = True
+                        break
+                    bn.append(sel)
+                if not bad and len(set(bn)) != 6:
+                    st.error("Party must have **six distinct** Pokémon.")
+                    bad = True
+                if not bad:
+                    party_rows_bs = [df.loc[df["name"] == n].iloc[0] for n in bn]
+                    rng_bs = random.Random(int(seed_val) + 61289)
+                    with st.spinner(
+                        f"**{int(bs_box_rounds)}** rounds × **20** trios (same opponent per round)…"
+                    ):
+                        ranked_bs = score_party_trios_paired(
+                            party_rows_bs,
+                            opp_frame,
+                            opponent_champions_full_dex=opponent_champions_full,
+                            df_roster=df,
+                            df_raw_data=df_raw,
+                            n_rounds=int(bs_box_rounds),
+                            num_turns=int(num_turns),
+                            move_pool=move_pool,
+                            scoring=scoring,
+                            rng=rng_bs,
+                        )
+                    best_b = ranked_bs[0]
+                    nbr = int(bs_box_rounds)
+                    wr_bb = best_b[1] / nbr
+                    lo_bb, hi_bb = wilson_score_interval(best_b[1], nbr)
+                    st.success(
+                        f"**Best trio:** {best_b[0]} — **{best_b[1]}**W / **{best_b[2]}**L / **{best_b[3]}**T "
+                        f"over **{nbr}** paired rounds"
+                    )
+                    st.metric(
+                        "Best trio win rate",
+                        f"{100 * wr_bb:.1f}%",
+                        help=f"Wilson 95% (wins): {100 * lo_bb:.1f}%–{100 * hi_bb:.1f}%",
+                    )
+                    top_nb = min(int(bs_box_topn), len(ranked_bs))
+                    st.dataframe(
+                        pd.DataFrame(
+                            [
+                                {
+                                    "Trio": lab,
+                                    "W": wv,
+                                    "L": lv,
+                                    "T": tv,
+                                    "Win %": round(100 * wv / nbr, 1),
+                                }
+                                for lab, wv, lv, tv in ranked_bs[:top_nb]
+                            ]
+                        ),
+                        hide_index=True,
+                        use_container_width=True,
+                    )
+
         with st.expander("Find best team by simulator win rate", expanded=False):
             st.caption(
-                "Optimizes **this app’s toy simulator** only—not cartridge or Showdown. "
-                "**Random search** finds a strong team, not a proven global optimum on large rosters. "
+                "Searches **3-Pokémon** active trios from the **filtered roster** (ranked format)—not a six-Pokémon "
+                "party box. Optimizes **this app’s toy simulator** only—not cartridge or Showdown. "
+                "**Random search** finds a strong trio, not a proven global optimum on large rosters. "
                 "Many candidates reuse **PokeAPI** move data (**cached 24h**)."
             )
             ox1, ox2, ox3 = st.columns(3)
@@ -1560,28 +1916,29 @@ with t4:
                 )
 
             R = len(my_opts)
-            n_combos = math.comb(R, team_size) if R >= team_size else 0
+            search_team_size = ranked_battle_size
+            n_combos = math.comb(R, search_team_size) if R >= search_team_size else 0
             use_exhaustive = n_combos > 0 and n_combos <= int(max_exhaustive_combos)
             if use_exhaustive:
                 st.info(
-                    f"**Exhaustive:** **{n_combos}** teams × **{int(opt_battles_per_team)}** battles each "
-                    f"(~**{n_combos * int(opt_battles_per_team)}** total battles)."
+                    f"**Exhaustive:** **{n_combos}** trios × **{int(opt_battles_per_team)}** battles each "
+                    f"(~**{n_combos * int(opt_battles_per_team)}** total battles). Ranked **3v3** only."
                 )
-            elif R < team_size:
-                st.warning("Filtered roster is smaller than team size; cannot search.")
+            elif R < search_team_size:
+                st.warning("Filtered roster is smaller than three; cannot search.")
             else:
                 st.info(
-                    f"**Random search:** **{int(opt_random_trials)}** sampled teams "
-                    f"(C({R},{team_size}) = **{n_combos}** > **{int(max_exhaustive_combos)}** cap)."
+                    f"**Random search:** **{int(opt_random_trials)}** sampled **3-Pokémon** teams "
+                    f"(C({R},{search_team_size}) = **{n_combos}** > **{int(max_exhaustive_combos)}** cap)."
                 )
 
             if st.button("Run team search", type="secondary", key="opt_run_search"):
-                if R < team_size:
+                if R < search_team_size:
                     st.error("Not enough Pokémon in the filtered roster.")
                 else:
                     rng_s = random.Random(int(seed_val) + 90210)
                     if use_exhaustive:
-                        team_iter: list[tuple[str, ...]] = list(itertools.combinations(my_opts, team_size))
+                        team_iter = list(itertools.combinations(my_opts, search_team_size))
                     else:
                         cap_trials = min(int(opt_random_trials), n_combos)
                         seen: set[tuple[str, ...]] = set()
@@ -1590,7 +1947,7 @@ with t4:
                         max_attempts = cap_trials * 80
                         while len(team_iter) < cap_trials and attempts < max_attempts:
                             attempts += 1
-                            draw = tuple(sorted(rng_s.sample(my_opts, team_size)))
+                            draw = tuple(sorted(rng_s.sample(my_opts, search_team_size)))
                             if draw not in seen:
                                 seen.add(draw)
                                 team_iter.append(draw)
@@ -1605,7 +1962,7 @@ with t4:
                         best_ties = 0
 
                         with st.spinner(
-                            f"Searching **{n_teams}** teams × **{int(opt_battles_per_team)}** battles "
+                            f"Searching **{n_teams}** trios × **{int(opt_battles_per_team)}** battles "
                             f"(same scoring, moves, turns, and opponent pool as above)…"
                         ):
                             bar = st.progress(0)
@@ -1617,7 +1974,7 @@ with t4:
                                     opponent_champions_full_dex=opponent_champions_full,
                                     df_roster=df,
                                     df_raw_data=df_raw,
-                                    team_size=team_size,
+                                    team_size=search_team_size,
                                     n_battles=int(opt_battles_per_team),
                                     num_turns=int(num_turns),
                                     move_pool=move_pool,
@@ -1657,16 +2014,26 @@ with t4:
 
         def _gather_my_team() -> tuple[list[str] | None, str | None]:
             names: list[str] = []
-            for i in range(team_size):
+            n_need = 6 if bs_roster_mode == "Party box (6 Pokémon)" else 3
+            for i in range(n_need):
                 sel = st.session_state.get(f"bs_dd_{i}", blank)
+                label = f"Party slot {i + 1}" if n_need == 6 else f"Pokémon {i + 1}"
                 if not sel or sel == blank:
-                    return None, f"Choose **Pokémon {i + 1}** from the dropdown."
+                    return None, f"Choose **{label}** from the dropdown."
                 names.append(sel)
+            if n_need == 6 and len(set(names)) != 6:
+                return None, "Party must have **six distinct** Pokémon."
             return names, None
 
         tn, _ = _gather_my_team()
         if tn:
-            st.caption(f"**Ready:** {', '.join(tn)}")
+            if len(tn) == 6:
+                st.caption(
+                    f"**Ready:** party of six — matches are **3v3** "
+                    f"({'oracle' if bs_party_subset_ui == PARTY_SUBSET_ORACLE else 'random'} trio per battle)."
+                )
+            else:
+                st.caption(f"**Ready (active 3):** {', '.join(tn)}")
         else:
             st.caption("Complete all slots to run battles, or apply from Team Builder.")
 
@@ -1678,6 +2045,11 @@ with t4:
             else:
                 rng = random.Random(int(seed_val))
                 my_rows = [df.loc[df["name"] == n].iloc[0] for n in team_names]
+                party_subset_run = (
+                    bs_party_subset_ui
+                    if bs_roster_mode == "Party box (6 Pokémon)"
+                    else PARTY_SUBSET_OFF
+                )
                 core4_cache: dict[str, list[str]] = {}
                 for r in my_rows:
                     core4_cache[str(r["name"])] = recommended_four_moves(r)
@@ -1690,7 +2062,7 @@ with t4:
                 n_b = int(num_battles)
                 for b in range(n_b):
                     opp_sample = opp_frame.sample(
-                        team_size, random_state=rng.randint(0, 10_000_000)
+                        ranked_battle_size, random_state=rng.randint(0, 10_000_000)
                     )
                     onames = opp_sample["name"].tolist()
                     source = df_raw if opponent_pool == "Champions (full dex)" else df
@@ -1700,10 +2072,12 @@ with t4:
                         if nm not in core4_cache:
                             core4_cache[nm] = recommended_four_moves(r)
 
-                    my_pts, opp_pts, outcome = run_coverage_battle(
+                    my_pts, opp_pts, outcome = run_coverage_battle_party(
                         my_rows,
                         opp_rows,
                         rng,
+                        battle_size=ranked_battle_size,
+                        party_subset=party_subset_run,
                         num_turns=int(num_turns),
                         move_pool=move_pool,
                         scoring=scoring,
@@ -1744,11 +2118,17 @@ with t4:
                     f"{100 * win_rate:.1f}%",
                     help=f"Wilson 95% interval (wins only): {100 * lo:.1f}%–{100 * hi:.1f}%",
                 )
+                party_note = ""
+                if party_subset_run == PARTY_SUBSET_ORACLE:
+                    party_note = " · party **oracle** (≤20 sims/battle)"
+                elif party_subset_run == PARTY_SUBSET_RANDOM:
+                    party_note = " · party **random 3**"
                 st.caption(
-                    f"{n_b} battles vs random **{pool_label}** **{team_size}v{team_size}** teams · "
+                    f"{n_b} battles vs random **{pool_label}** **3v3** teams · "
                     f"**{int(num_turns)}** turns/battle · seed **{int(seed_val)}** · "
                     f"**{move_pool.split()[0]}** moves · "
-                    f"**{BATTLE_SCORING_SUMMARY_LABEL.get(scoring, scoring)}** scoring."
+                    f"**{BATTLE_SCORING_SUMMARY_LABEL.get(scoring, scoring)}** scoring"
+                    f"{party_note}."
                 )
 
                 with st.expander("Sample battle log (first battles in this run)"):
