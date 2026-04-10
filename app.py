@@ -311,6 +311,69 @@ def recommended_four_moves(row: pd.Series) -> list[str]:
     return out[:4]
 
 
+LEDGER_HIDDEN_COLS = frozenset({"all_moves", "national_dex_hint", "pokemon_id"})
+
+
+def ledger_column_order(columns: list[str]) -> list[str]:
+    """Place pokeapi_id immediately left of name; keep other columns in original order."""
+    cols = list(columns)
+    ordered: list[str] = []
+    if "pokeapi_id" in cols:
+        ordered.append("pokeapi_id")
+    if "name" in cols:
+        ordered.append("name")
+    for c in cols:
+        if c not in ordered:
+            ordered.append(c)
+    return ordered
+
+
+@st.cache_data(ttl=86400, show_spinner=False)
+def ledger_moveset_display(
+    name: str,
+    moves_key: str,
+    types_key: str,
+    attack: int,
+    sp_attack: int,
+) -> str:
+    """Cached four-move summary string for the DEX ledger (same heuristic as Team Builder)."""
+    try:
+        moves = json.loads(moves_key)
+    except (json.JSONDecodeError, TypeError):
+        moves = []
+    try:
+        types = json.loads(types_key)
+    except (json.JSONDecodeError, TypeError):
+        types = []
+    row = pd.Series(
+        {
+            "name": name,
+            "all_moves": moves,
+            "types": types,
+            "attack": int(attack),
+            "sp_attack": int(sp_attack),
+        }
+    )
+    m = recommended_four_moves(row)
+    return " · ".join(m) if m else "—"
+
+
+def ledger_dataframe_selection_row_index(ev) -> int | None:
+    """First selected row index from st.dataframe(..., on_select='rerun'), or None."""
+    if ev is None:
+        return None
+    sel = ev["selection"] if isinstance(ev, dict) else getattr(ev, "selection", None)
+    if sel is None:
+        return None
+    rows = sel["rows"] if isinstance(sel, dict) else getattr(sel, "rows", None)
+    if not rows:
+        return None
+    try:
+        return int(rows[0])
+    except (TypeError, ValueError, IndexError):
+        return None
+
+
 def wilson_score_interval(successes: int, n: int, z: float = 1.96) -> tuple[float, float]:
     """Approximate binomial 95% CI (Wilson); returns (low, high) in [0, 1]."""
     if n <= 0:
@@ -507,19 +570,60 @@ with t1:
     show = df.copy()
     if search.strip():
         show = show[show["name"].astype(str).str.contains(search.strip(), case=False, na=False)]
-    disp = [c for c in show.columns if c != "all_moves"]
-    show_table = show[disp].copy()
-    if "types" in show_table.columns:
-        show_table["types"] = show_table["types"].apply(format_types_for_display)
-    st.dataframe(
-        show_table,
-        use_container_width=True,
-        hide_index=True,
-        column_config={"image_url": st.column_config.ImageColumn("Art", width="small")},
-    )
-    names = show["name"].astype(str).tolist()
-    pick = st.selectbox("Select Pokémon for detail", options=names or ["—"])
-    if pick and pick != "—":
+
+    if show.empty:
+        st.info("No Pokémon match this search.")
+    else:
+        disp = [c for c in show.columns if c not in LEDGER_HIDDEN_COLS]
+        show_table = show[disp].copy()
+        if "types" in show_table.columns:
+            show_table["types"] = show_table["types"].apply(format_types_for_display)
+
+        def _row_moveset_cell(r: pd.Series) -> str:
+            mk = json.dumps(parse_list_cell(r.get("all_moves")))
+            tk = json.dumps(parse_list_cell(r.get("types")))
+            return ledger_moveset_display(
+                str(r["name"]),
+                mk,
+                tk,
+                int(r["attack"]),
+                int(r["sp_attack"]),
+            )
+
+        with st.spinner("Computing **Moveset** column (PokeAPI per move; cached 24h after first load)…"):
+            show_table["Moveset"] = show.apply(_row_moveset_cell, axis=1)
+
+        ledger_event = st.dataframe(
+            show_table,
+            use_container_width=True,
+            hide_index=True,
+            column_order=ledger_column_order(list(show_table.columns)),
+            column_config={
+                "pokeapi_id": st.column_config.NumberColumn(
+                    "PokéAPI id", help="Numeric id from PokéAPI /pokemon", format="%d"
+                ),
+                "image_url": st.column_config.ImageColumn("Art", width="small"),
+                "Moveset": st.column_config.TextColumn("Moveset", width="large"),
+            },
+            on_select="rerun",
+            selection_mode="single-row",
+            key="ledger_df",
+        )
+
+        names = show["name"].astype(str).tolist()
+        if st.session_state.get("ledger_sb") not in names:
+            st.session_state["ledger_sb"] = names[0]
+
+        ridx = ledger_dataframe_selection_row_index(ledger_event)
+        if ridx is not None and 0 <= ridx < len(show):
+            st.session_state["ledger_sb"] = str(show.iloc[ridx]["name"])
+
+        st.caption(
+            "Click a **row** in the table to sync the detail panel (deselect the row to use only the dropdown). "
+            "**Moveset** = top 4 moves by the same heuristic as Team Builder."
+        )
+        pick = st.selectbox("Select Pokémon for detail", options=names, key="ledger_sb")
+
         row = show.loc[show["name"] == pick].iloc[0]
         c1, c2 = st.columns([1, 2])
         with c1:
@@ -559,6 +663,11 @@ with t1:
                 height=420,
             )
             st.plotly_chart(fig, use_container_width=True)
+            rmoves = recommended_four_moves(row)
+            if rmoves:
+                st.markdown("**Moveset:** " + " · ".join(rmoves))
+            else:
+                st.caption("Moveset could not be resolved (empty learnset or PokeAPI).")
 
 with t2:
     st.subheader("The Audit")
