@@ -789,6 +789,8 @@ if df.empty:
     st.warning("No rows match the selected sidebar filters.")
     st.stop()
 
+champs = df_raw[df_raw["game_source"].astype(str).str.contains("Champions", case=False, na=False)]
+
 t1, t2, t3, t4 = st.tabs(["DEX Analyzer", "Movepool Inspector", "Team Builder", "Battle Simulator"])
 
 with t1:
@@ -921,6 +923,8 @@ with t2:
 
 def _team_builder_insight(role: str, row: pd.Series) -> str:
     """Human-readable rationale tied to the meta-optimal role rules."""
+    if role == "Pinned":
+        return "**Pinned** by you—kept on the team before the remaining slots are filled from role bands."
     if role.startswith("Speedster"):
         return (
             f"**Speed {int(row['speed'])}** beats the **>110** benchmark. That usually means you move first "
@@ -947,93 +951,400 @@ def _team_builder_insight(role: str, row: pd.Series) -> str:
     )
 
 
+def _max_team_weak_to_single_type(rows: list[pd.Series]) -> int:
+    """Largest count of Pokémon in `rows` that are weak (>1×) to one attacking type."""
+    if not rows:
+        return 0
+    worst = 0
+    for atk in TYPE_FILTER_ORDER:
+        c = 0
+        for row in rows:
+            dt = [t.lower() for t in parse_list_cell(row.get("types")) if t]
+            if dt and type_multiplier(atk, dt) > 1.0:
+                c += 1
+        worst = max(worst, c)
+    return worst
+
+
+def _team_unique_types(rows: list[pd.Series]) -> set[str]:
+    s: set[str] = set()
+    for row in rows:
+        for t in parse_list_cell(row.get("types")):
+            s.add(str(t).lower().strip())
+    return s
+
+
+def _team_offensive_stab_coverage(rows: list[pd.Series]) -> int:
+    """How many type names appear as STAB on at least one team member (diversity proxy)."""
+    return len(_team_unique_types(rows))
+
+
+def generate_role_band_team(
+    p: pd.DataFrame,
+    mode: str,
+    rng: random.Random,
+    speed_thr: int,
+    bulk_thr: int,
+    offense_thr: int,
+    pinned_names: list[str],
+) -> list[tuple[str, pd.Series]] | None:
+    """
+    Random team from role bands; pins are included first (order preserved), then pools fill the rest.
+    """
+    team_size = 3 if mode == "3v3" else 6
+
+    def pool_speedster(frame: pd.DataFrame) -> pd.DataFrame:
+        return frame[frame["speed"] > speed_thr]
+
+    def pool_tank(frame: pd.DataFrame) -> pd.DataFrame:
+        return frame[(frame["hp"] > bulk_thr) | (frame["defense"] > bulk_thr)]
+
+    def pool_hitter(frame: pd.DataFrame) -> pd.DataFrame:
+        return frame[(frame["attack"] > offense_thr) | (frame["sp_attack"] > offense_thr)]
+
+    seen: set[str] = set()
+    picks: list[tuple[str, pd.Series]] = []
+
+    for nm in pinned_names:
+        if nm in seen:
+            continue
+        match = p.index[p["name"].astype(str) == nm]
+        if len(match) == 0:
+            continue
+        row = p.loc[match[0]]
+        picks.append(("Pinned", row))
+        seen.add(str(row["name"]))
+        if len(picks) >= team_size:
+            break
+
+    if len(picks) > team_size:
+        picks = picks[:team_size]
+
+    spd_full, tnk_full, hit_full = pool_speedster(p), pool_tank(p), pool_hitter(p)
+    if spd_full.empty or tnk_full.empty or hit_full.empty:
+        return None
+
+    def sample_from(pool: pd.DataFrame, role: str) -> bool:
+        if len(picks) >= team_size:
+            return True
+        sub = pool[~pool["name"].astype(str).isin(seen)]
+        if sub.empty:
+            sub = p[~p["name"].astype(str).isin(seen)]
+        if sub.empty:
+            return False
+        row = sub.sample(1, random_state=rng.randint(0, 10_000_000)).iloc[0]
+        nm = str(row["name"])
+        picks.append((role, row))
+        seen.add(nm)
+        return True
+
+    if mode == "3v3":
+        if len(picks) < team_size and not sample_from(pool_speedster(p), "Speedster"):
+            return None
+        if len(picks) < team_size and not sample_from(pool_tank(p), "Tank"):
+            return None
+        if len(picks) < team_size and not sample_from(pool_hitter(p), "Heavy hitter"):
+            return None
+        picks = picks[:team_size]
+    else:
+        for pool_fn, base in (
+            (pool_speedster, "Speedster"),
+            (pool_tank, "Tank"),
+            (pool_hitter, "Heavy hitter"),
+        ):
+            sub = pool_fn(p)
+            sub = sub[~sub["name"].astype(str).isin(seen)]
+            k = min(2, len(sub))
+            if k == 0:
+                continue
+            sampled = sub.sample(k, random_state=rng.randint(0, 10_000_000))
+            for j in range(len(sampled)):
+                if len(picks) >= team_size:
+                    break
+                row = sampled.iloc[j]
+                nm = str(row["name"])
+                if nm in seen:
+                    continue
+                seen.add(nm)
+                picks.append((f"{base} #{j + 1}", row))
+        deduped: list[tuple[str, pd.Series]] = []
+        seen2: set[str] = set()
+        for role, row in picks:
+            nm = str(row["name"])
+            if nm in seen2:
+                continue
+            seen2.add(nm)
+            deduped.append((role, row))
+        picks = deduped
+        seen = seen2
+        while len(picks) < team_size:
+            rest = p[~p["name"].astype(str).isin(seen)]
+            if rest.empty:
+                break
+            row = rest.sample(1, random_state=rng.randint(0, 10_000_000)).iloc[0]
+            nm = str(row["name"])
+            seen.add(nm)
+            picks.append(("Flex", row))
+        picks = picks[:team_size]
+
+    return picks if len(picks) == team_size else None
+
+
+def render_team_builder_summary(picks: list[tuple[str, pd.Series]], core4_by_name: dict[str, list[str]]) -> None:
+    rows = [pr for _, pr in picks]
+    ut = _team_unique_types(rows)
+    st.markdown("#### Team summary")
+    c1, c2, c3 = st.columns(3)
+    with c1:
+        st.metric("Unique typings (STAB slots)", len(ut))
+    with c2:
+        st.metric("Max weak to one type", _max_team_weak_to_single_type(rows))
+    with c3:
+        st.metric("Offensive type diversity", _team_offensive_stab_coverage(rows))
+
+    weak_lines: list[str] = []
+    for atk in TYPE_FILTER_ORDER:
+        victims = [str(pr["name"]) for _, pr in picks if parse_list_cell(pr.get("types")) and type_multiplier(atk, [t.lower() for t in parse_list_cell(pr.get("types"))]) > 1.0]
+        if len(victims) >= 2:
+            weak_lines.append(f"**{atk.title()}** hits **{len(victims)}** super-effectively: {', '.join(victims)}")
+    if weak_lines:
+        st.markdown("**Shared pressure typings** (≥2 of your team weak)")
+        for line in weak_lines[:12]:
+            st.caption(line)
+    else:
+        st.caption("No offensive type hits two or more of your team super-effectively at once.")
+
+    exp_txt = []
+    for role, pr in picks:
+        nm = str(pr["name"])
+        ts = "/".join(str(t).title() for t in parse_list_cell(pr.get("types")))
+        mv = core4_by_name.get(nm, [])
+        exp_txt.append(f"{nm} ({role}) [{ts}] — {' / '.join(mv) if mv else '—'}")
+    st.download_button(
+        "Download team (.txt)",
+        data="\n".join(exp_txt),
+        file_name="pokemon_2026_macdro_team.txt",
+        mime="text/plain",
+        key="tb_download_team",
+    )
+
+
 with t3:
-    st.subheader("3v3 / 6v6")
-    mode = st.radio("Format", ["3v3", "6v6"], horizontal=True)
+    st.subheader("Team Builder — role bands + random")
+    st.caption(
+        "Random samples from **Speedster / Tank / Heavy hitter** pools on your **sidebar-filtered** roster. "
+        "Tune thresholds and **seed** to explore; constraints optionally **retry** sampling. "
+        "Not a tournament export—**core 4** moves use the same **PokeAPI** heuristic as elsewhere."
+    )
 
-    def pool_speedster(p):
-        return p[p["speed"] > 110]
+    mode = st.radio("Format", ["3v3", "6v6"], horizontal=True, key="tb_format")
+    team_size = 3 if mode == "3v3" else 6
+    tb_opts = sorted(df["name"].astype(str).unique().tolist())
 
-    def pool_tank(p):
-        return p[(p["hp"] > 100) | (p["defense"] > 100)]
+    sg1, sg2 = st.columns([2, 1])
+    with sg1:
+        tb_seed = st.number_input(
+            "RNG seed (same seed + filters = reproducible; change for a new roll)",
+            min_value=0,
+            max_value=2_147_483_647,
+            value=int(st.session_state.get("tb_seed_val", 4242)),
+            step=1,
+            key="tb_seed_val",
+        )
+    with sg2:
+        st.write("")
+        st.write("")
+        if st.button("Randomize seed", key="tb_seed_rand"):
+            st.session_state["tb_seed_val"] = random.randint(1, 2_147_483_646)
+            st.rerun()
 
-    def pool_hitter(p):
-        return p[(p["attack"] > 110) | (p["sp_attack"] > 110)]
+    h1, h2, h3 = st.columns(3)
+    with h1:
+        thr_speed = st.number_input("Speedster: Speed >", min_value=1, max_value=200, value=110, key="tb_thr_spd")
+    with h2:
+        thr_bulk = st.number_input("Tank: HP or Def >", min_value=1, max_value=200, value=100, key="tb_thr_bulk")
+    with h3:
+        thr_off = st.number_input("Heavy: Atk or Sp. Atk >", min_value=1, max_value=200, value=110, key="tb_thr_off")
 
-    if st.button("Generate Meta-Optimal Team", type="primary"):
+    pref_weak_spread = st.checkbox(
+        "Prefer spread weaknesses — retry until **≤2** team members are weak to the same attacking type",
+        value=True,
+        key="tb_pref_weak",
+    )
+    pref_type_div = st.checkbox(
+        "Prefer type diversity — retry until **≥3** unique typings on the team",
+        value=True,
+        key="tb_pref_div",
+    )
+
+    tb_pins = st.multiselect(
+        "Pin Pokémon (always on the team if in the filtered roster; max = format size)",
+        options=tb_opts,
+        default=[],
+        max_selections=team_size,
+        key="tb_pins_sel",
+        help="Filled slots skip random picks for those Pokémon; remaining slots use role bands.",
+    )
+
+    if st.button("Generate team (role bands + random)", type="primary", key="tb_generate_btn"):
         p = df.copy()
-        spd, tnk, hit = pool_speedster(p), pool_tank(p), pool_hitter(p)
-        if spd.empty or tnk.empty or hit.empty:
-            st.error("Filtered roster too small for role pools.")
+        spd_chk = p[p["speed"] > int(thr_speed)]
+        tnk_chk = p[(p["hp"] > int(thr_bulk)) | (p["defense"] > int(thr_bulk))]
+        hit_chk = p[(p["attack"] > int(thr_off)) | (p["sp_attack"] > int(thr_off))]
+        if spd_chk.empty or tnk_chk.empty or hit_chk.empty:
+            st.error("Filtered roster too small for these role thresholds—lower the numbers.")
         else:
-            picks: list[tuple[str, pd.Series]] = []
-            if mode == "3v3":
-                rs1, rs2, rs3 = random.randint(0, 99999), random.randint(0, 99999), random.randint(0, 99999)
-                picks = [
-                    ("Speedster", spd.sample(1, random_state=rs1).iloc[0]),
-                    ("Tank", tnk.sample(1, random_state=rs2).iloc[0]),
-                    ("Heavy hitter", hit.sample(1, random_state=rs3).iloc[0]),
-                ]
-            else:
-                rng = random.Random()
-                for pool_fn, base in (
-                    (pool_speedster, "Speedster"),
-                    (pool_tank, "Tank"),
-                    (pool_hitter, "Heavy hitter"),
-                ):
-                    sub = pool_fn(p)
-                    k = min(2, len(sub))
-                    sampled = sub.sample(k, random_state=rng.randint(0, 10_000_000))
-                    for j in range(len(sampled)):
-                        picks.append((f"{base} #{j + 1}", sampled.iloc[j]))
-                seen: set[str] = set()
-                deduped: list[tuple[str, pd.Series]] = []
-                for role, row in picks:
-                    nm = str(row["name"])
-                    if nm in seen:
-                        continue
-                    seen.add(nm)
-                    deduped.append((role, row))
-                picks = deduped
-                while len(picks) < 6:
-                    rest = p[~p["name"].astype(str).isin(seen)]
-                    if rest.empty:
-                        break
-                    row = rest.sample(1, random_state=rng.randint(0, 10_000_000)).iloc[0]
-                    nm = str(row["name"])
-                    seen.add(nm)
-                    picks.append(("Flex", row))
-                picks = picks[:6]
-
-            st.session_state["last_built_team"] = {
-                "format": mode,
-                "names": [str(prow["name"]) for _, prow in picks],
-            }
-
-            with st.spinner("Ranking **best 4 moves** per Pokémon via PokeAPI (results are cached for 24h)…"):
-                core4_by_name: dict[str, list[str]] = {}
-                for _, prow in picks:
-                    nm = str(prow["name"])
-                    if nm not in core4_by_name:
-                        core4_by_name[nm] = recommended_four_moves(prow)
-
-            st.success("Suggested team")
-            st.markdown("#### Why this recommendation")
-            st.info(
-                "The builder **randomly samples** from your **sidebar-filtered** roster using three "
-                "**archetype bands**: **Speedster** (Speed > 110), **Tank** (HP or Def > 100), and "
-                "**Heavy hitter** (Atk or Sp. Atk > 110). Together they target **tempo**, **durability**, "
-                "and **wallbreaking**—a compact checklist for short games. "
-                + (
-                    "In **6v6**, you get up to **two** picks per band when possible, then **Flex** slots to reach six."
-                    if mode == "6v6"
-                    else ""
+            picks: list[tuple[str, pd.Series]] | None = None
+            for attempt in range(56):
+                try_rng = random.Random(int(tb_seed) + attempt * 7919)
+                cand = generate_role_band_team(
+                    p,
+                    mode,
+                    try_rng,
+                    int(thr_speed),
+                    int(thr_bulk),
+                    int(thr_off),
+                    list(tb_pins),
                 )
-                + " Each card’s **core 4 moves** are auto-ranked from that Pokémon’s learnset using **PokeAPI** "
-                "(base power, STAB, physical vs special bias from its stats, plus a small priority list for "
-                "common support moves)—a **heuristic**, not a copied tournament export."
+                if cand is None:
+                    break
+                rows_only = [pr for _, pr in cand]
+                if pref_weak_spread and _max_team_weak_to_single_type(rows_only) > 2:
+                    continue
+                if pref_type_div and len(_team_unique_types(rows_only)) < min(3, len(rows_only)):
+                    continue
+                picks = cand
+                break
+
+            if picks is None:
+                st.error(
+                    "Could not build a team (empty pools, pins not in roster, or constraints too strict—"
+                    "uncheck filters or lower thresholds)."
+                )
+            else:
+                st.session_state["last_built_team"] = {
+                    "format": mode,
+                    "names": [str(prow["name"]) for _, prow in picks],
+                }
+                st.session_state["tb_last_roles"] = [role for role, _ in picks]
+                st.session_state["tb_last_names"] = [str(prow["name"]) for _, prow in picks]
+
+                with st.spinner("Ranking **best 4 moves** per Pokémon via PokeAPI (cached 24h)…"):
+                    core4_by_name: dict[str, list[str]] = {}
+                    for _, prow in picks:
+                        nm = str(prow["name"])
+                        if nm not in core4_by_name:
+                            core4_by_name[nm] = recommended_four_moves(prow)
+                    st.session_state["tb_core4"] = core4_by_name
+
+                st.rerun()
+
+    if st.session_state.get("tb_last_names") and st.session_state.get("tb_last_roles"):
+        try:
+            tnames = st.session_state["tb_last_names"]
+            troles = st.session_state["tb_last_roles"]
+            picks = []
+            for ri, nm in enumerate(tnames):
+                row = df.loc[df["name"] == nm].iloc[0]
+                picks.append((troles[ri], row))
+            core4_by_name = st.session_state.get("tb_core4", {})
+
+            hb1, hb2 = st.columns([4, 1])
+            with hb1:
+                st.markdown("#### Current build")
+            with hb2:
+                if st.button("Clear team", key="tb_clear_disp"):
+                    for k in ("tb_last_names", "tb_last_roles", "tb_core4", "last_built_team"):
+                        st.session_state.pop(k, None)
+                    st.rerun()
+
+            st.info(
+                f"**Speedster:** Speed > **{thr_speed}** · **Tank:** HP or Def > **{thr_bulk}** · "
+                f"**Heavy:** Atk or Sp. Atk > **{thr_off}** · seed **{int(tb_seed)}**. "
+                f"Constraints: **weak spread** {'on' if pref_weak_spread else 'off'}, "
+                f"**type diversity** {'on' if pref_type_div else 'off'}."
             )
 
+            render_team_builder_summary(picks, core4_by_name)
+
+            with st.expander("Quick simulator — win rate vs random opponents", expanded=False):
+                st.caption(
+                    "Same toy model as **Battle Simulator** (not cartridge/Showdown). Uses **Champions** or "
+                    "**filtered** pool below; many battles ⇒ more **PokeAPI** use unless cached."
+                )
+                q1, q2 = st.columns(2)
+                with q1:
+                    tb_q_opp = st.selectbox(
+                        "Opponent pool",
+                        options=["Champions (full dex)", "Sidebar-filtered roster"],
+                        index=0,
+                        key="tb_quick_opp",
+                    )
+                with q2:
+                    tb_q_bpt = st.number_input(
+                        "Battles",
+                        min_value=12,
+                        max_value=400,
+                        value=40,
+                        step=4,
+                        key="tb_quick_bpt",
+                    )
+                tb_q_turns = st.number_input(
+                    "Turns per battle",
+                    min_value=4,
+                    max_value=24,
+                    value=8,
+                    key="tb_quick_turns",
+                )
+                tb_q_moves = st.selectbox(
+                    "Moves considered",
+                    options=["Suggested 4 (heuristic)", "Full learnset (trimmed if huge)"],
+                    index=0,
+                    key="tb_quick_moves",
+                )
+                st.markdown("**Scoring**")
+                tb_q_score_pick = st.radio(
+                    "Quick sim scoring",
+                    options=list(BATTLE_SCORING_OPTIONS),
+                    horizontal=True,
+                    label_visibility="collapsed",
+                    key="tb_quick_score",
+                )
+                st.caption(BATTLE_SCORING_DESCRIPTIONS[tb_q_score_pick])
+                tb_q_scoring = BATTLE_SCORING_INTERNAL[tb_q_score_pick]
+
+                if st.button("Run quick win-rate estimate", key="tb_quick_run"):
+                    opp_f = champs if tb_q_opp == "Champions (full dex)" else df
+                    tsz = len(picks)
+                    if opp_f.empty or len(opp_f) < tsz:
+                        st.warning("Opponent pool too small for this format.")
+                    else:
+                        my_rows = [pr for _, pr in picks]
+                        rng_q = random.Random(int(tb_seed) + 31337)
+                        w, ell, tie_c = estimate_win_rate(
+                            my_rows,
+                            opp_f,
+                            opponent_champions_full_dex=(tb_q_opp == "Champions (full dex)"),
+                            df_roster=df,
+                            df_raw_data=df_raw,
+                            team_size=tsz,
+                            n_battles=int(tb_q_bpt),
+                            num_turns=int(tb_q_turns),
+                            move_pool=tb_q_moves,
+                            scoring=tb_q_scoring,
+                            rng=rng_q,
+                        )
+                        nb = int(tb_q_bpt)
+                        wr = w / nb
+                        lo, hi = wilson_score_interval(w, nb)
+                        st.metric("Wins / Losses / Ties", f"{w} / {ell} / {tie_c}")
+                        st.metric(
+                            "Win rate",
+                            f"{100 * wr:.1f}%",
+                            help=f"Wilson 95% (wins): {100 * lo:.1f}%–{100 * hi:.1f}%",
+                        )
+
+            st.markdown("#### Roster cards")
             ncols = 3
             for row_start in range(0, len(picks), ncols):
                 row_slice = picks[row_start : row_start + ncols]
@@ -1095,6 +1406,12 @@ with t3:
                             st.caption("No moves resolved (check network / PokeAPI).")
                         with st.expander("Why this Pokémon"):
                             st.markdown(_team_builder_insight(role, prow))
+        except (KeyError, IndexError):
+            st.caption("Regenerate the team after changing sidebar filters (saved names left the roster).")
+            if st.button("Clear saved team", key="tb_clear_saved"):
+                for k in ("tb_last_names", "tb_last_roles", "tb_core4", "last_built_team"):
+                    st.session_state.pop(k, None)
+                st.rerun()
 
 with t4:
     st.subheader("Monte Carlo — coverage simulator")
@@ -1104,8 +1421,6 @@ with t4:
         "**31 IV**, **252 / 252 / 4** EVs, **Timid** (special) or **Jolly** (physical), then a **damage stub** "
         "(STAB + type chart) scaled by **Speed** (+5% faster, −5% slower)."
     )
-
-    champs = df_raw[df_raw["game_source"].astype(str).str.contains("Champions", case=False, na=False)]
 
     c_opt1, c_opt2 = st.columns(2)
     with c_opt1:
