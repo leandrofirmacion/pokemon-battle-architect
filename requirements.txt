@@ -1,0 +1,5 @@
+# Streamlit Community Cloud installs this file by default.
+streamlit>=1.28.0
+pandas>=1.5.0
+plotly>=5.18.0
+requests>=2.31.0
