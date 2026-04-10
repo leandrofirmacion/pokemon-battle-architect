@@ -326,15 +326,6 @@ if "is_mega" in df_raw.columns:
         lambda x: str(x).lower() in ("true", "1", "yes") if pd.notna(x) else False
     )
 
-with st.sidebar:
-    st.header("Global filter")
-    game_pick = st.multiselect(
-        "Game version",
-        options=["Champions", "Legends Z-A"],
-        default=["Champions", "Legends Z-A"],
-        help="Rows where game_source contains the selected label.",
-    )
-
 
 def filter_by_games(frame: pd.DataFrame, versions: list[str]) -> pd.DataFrame:
     if not versions:
@@ -345,37 +336,89 @@ def filter_by_games(frame: pd.DataFrame, versions: list[str]) -> pd.DataFrame:
     return frame.loc[mask].copy()
 
 
-df = filter_by_games(df_raw, game_pick)
+def match_game_type_mode(src: str, mode: str) -> bool:
+    """Refine rows by how game_source lists Champions vs Legends Z-A."""
+    s = str(src).lower()
+    has_c = "champions" in s
+    has_z = "legends z-a" in s or ("legends" in s and "z-a" in s)
+    if mode == "Any":
+        return True
+    if mode == "Champions only":
+        return has_c and not has_z
+    if mode == "Legends Z-A only":
+        return has_z and not has_c
+    if mode == "Both games":
+        return has_c and has_z
+    return True
+
+
+def apply_sidebar_filters(
+    frame: pd.DataFrame,
+    type_selection: list[str],
+    mega_mode: str,
+    game_type_mode: str,
+) -> pd.DataFrame:
+    """Apply type, mega, and game-type filters (after game version)."""
+    out = frame.copy()
+    if type_selection:
+        needles = {t.lower() for t in type_selection}
+
+        def _types_overlap(cell) -> bool:
+            return bool(needles.intersection({x.lower() for x in parse_list_cell(cell)}))
+
+        out = out[out["types"].apply(_types_overlap)]
+    if mega_mode == "Mega":
+        out = out[out["is_mega"].astype(bool)]
+    elif mega_mode == "Not mega":
+        out = out[~out["is_mega"].astype(bool)]
+    if game_type_mode != "Any":
+        out = out[out["game_source"].apply(lambda s: match_game_type_mode(str(s), game_type_mode))]
+    return out
+
+
+with st.sidebar:
+    st.header("Global filter")
+    game_pick = st.multiselect(
+        "Game version",
+        options=["Champions", "Legends Z-A"],
+        default=["Champions", "Legends Z-A"],
+        help="Rows where game_source contains the selected label.",
+    )
+    type_pick = st.multiselect(
+        "Type",
+        options=[t.title() for t in TYPE_FILTER_ORDER],
+        default=[],
+        help="Pokémon that have any selected type (primary or secondary). Leave empty for all types.",
+    )
+    mega_pick = st.selectbox(
+        "Mega",
+        options=["All", "Mega", "Not mega"],
+        index=0,
+        help="Filter by Mega Evolution rows (is_mega).",
+    )
+    game_type_pick = st.selectbox(
+        "Game type",
+        options=["Any", "Champions only", "Legends Z-A only", "Both games"],
+        index=0,
+        help="Refine by how game_source tags Champions vs Legends Z-A (exclusive or both).",
+    )
+
+
+df_base = filter_by_games(df_raw, game_pick)
+df = apply_sidebar_filters(df_base, type_pick, mega_pick, game_type_pick)
 if df.empty:
-    st.warning("No rows match the selected game filters.")
+    st.warning("No rows match the selected sidebar filters.")
     st.stop()
 
 t1, t2, t3, t4 = st.tabs(["DEX Analyzer", "Movepool Inspector", "Team Builder", "Battle Simulator"])
 
 with t1:
     st.subheader("The Ledger")
-    col_search, col_type = st.columns(2)
-    with col_search:
-        search = st.text_input("Search roster", placeholder="Filter by name…")
-    with col_type:
-        type_choices = ["All types"] + [t.title() for t in TYPE_FILTER_ORDER]
-        type_filter = st.selectbox(
-            "Filter by type",
-            options=type_choices,
-            index=0,
-            help="Show Pokémon that include this type (primary or secondary).",
-        )
+    search = st.text_input("Search roster", placeholder="Filter by name…")
 
     show = df.copy()
     if search.strip():
         show = show[show["name"].astype(str).str.contains(search.strip(), case=False, na=False)]
-    if type_filter != "All types":
-        needle = type_filter.lower()
-
-        def _row_has_type(cell) -> bool:
-            return needle in [x.lower() for x in parse_list_cell(cell)]
-
-        show = show[show["types"].apply(_row_has_type)]
     disp = [c for c in show.columns if c != "all_moves"]
     show_table = show[disp].copy()
     if "types" in show_table.columns:
