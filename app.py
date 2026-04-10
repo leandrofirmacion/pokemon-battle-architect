@@ -43,6 +43,14 @@ def parse_list_cell(val) -> list:
             return []
 
 
+def format_types_for_display(val) -> str:
+    """Human-readable types for tables (e.g. Grass/Poison)."""
+    parts = parse_list_cell(val)
+    if not parts:
+        return "—"
+    return "/".join(str(p).strip().title() for p in parts)
+
+
 TYPE_CHART: dict[str, dict[str, float]] = {
     "normal": {"rock": 0.5, "ghost": 0.0, "steel": 0.5},
     "fire": {"fire": 0.5, "water": 0.5, "grass": 2.0, "ice": 2.0, "bug": 2.0, "steel": 2.0, "dragon": 0.5},
@@ -369,8 +377,11 @@ with t1:
 
         show = show[show["types"].apply(_row_has_type)]
     disp = [c for c in show.columns if c != "all_moves"]
+    show_table = show[disp].copy()
+    if "types" in show_table.columns:
+        show_table["types"] = show_table["types"].apply(format_types_for_display)
     st.dataframe(
-        show[disp],
+        show_table,
         use_container_width=True,
         hide_index=True,
         column_config={"image_url": st.column_config.ImageColumn("Art", width="small")},
