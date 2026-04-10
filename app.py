@@ -507,6 +507,10 @@ def render_rules_summary(
     )
 
 
+def warn_with_fix(problem: str, fix: str) -> None:
+    st.warning(f"Problem: {problem}  Fix: {fix}")
+
+
 def moves_for_battle_sim(
     row: pd.Series,
     move_pool: str,
@@ -1597,6 +1601,7 @@ with t3:
         "Build a **Party (6)**, then choose your **Active team (3)** for ranked-style 3v3.\n"
         "Random picks use Speedster/Tank/Heavy pools from your filtered roster. Not cartridge/Showdown rules."
     )
+    st.divider()
 
     tb_party_size = 6
     tb_opts = sorted(df["name"].astype(str).unique().tolist())
@@ -1658,7 +1663,7 @@ with t3:
         tnk_chk = p[(p["hp"] > int(thr_bulk)) | (p["defense"] > int(thr_bulk))]
         hit_chk = p[(p["attack"] > int(thr_off)) | (p["sp_attack"] > int(thr_off))]
         if spd_chk.empty or tnk_chk.empty or hit_chk.empty:
-            st.error("Filtered roster too small for these role thresholds—lower the numbers.")
+            st.error("Problem: filtered roster is too small for current role thresholds. Fix: lower one or more thresholds.")
         else:
             picks: list[tuple[str, pd.Series]] | None = None
             for attempt in range(56):
@@ -1683,10 +1688,7 @@ with t3:
                 break
 
             if picks is None:
-                st.error(
-                    "Could not build a team (empty pools, pins not in roster, or constraints too strict—"
-                    "uncheck filters or lower thresholds)."
-                )
+                st.error("Problem: could not build a party. Fix: loosen constraints, lower thresholds, or adjust filters/pins.")
             else:
                 st.session_state["last_built_team"] = {
                     "format": "party_6",
@@ -1827,15 +1829,15 @@ with t3:
                     f"({int(tb_q_bpt)} battles × {sims_per_battle} sim/battle)."
                 )
 
-                if st.button("Run quick win-rate estimate", key="tb_quick_run"):
+                if st.button("Estimate win rate", key="tb_quick_run"):
                     opp_f = champs if tb_q_opp == "Champions (full dex)" else df
                     ranked_size = 3
                     if opp_f.empty or len(opp_f) < ranked_size:
-                        st.warning("Opponent pool too small for ranked 3v3.")
+                        warn_with_fix("opponent pool is too small for ranked 3v3.", "broaden filters or switch opponent pool.")
                     elif n_party not in (3, 6):
-                        st.warning("Regenerate a six-Pokémon party (or use a three-Pokémon legacy team).")
+                        warn_with_fix("team size is invalid for this simulator.", "generate Party (6) or use a legacy Active team (3).")
                     elif n_party == 6 and len({str(pr["name"]) for _, pr in picks}) < 6:
-                        st.warning("Party must have **six distinct** Pokémon.")
+                        warn_with_fix("Party (6) has duplicates.", "replace duplicates or regenerate party.")
                     else:
                         my_rows = [pr for _, pr in picks]
                         rng_q = random.Random(int(tb_seed) + 31337)
@@ -1872,9 +1874,9 @@ with t3:
                     "**Quick simulator** above."
                 )
                 if n_party != 6:
-                    st.info("Generate a **six-Pokémon** party to rank trios here.")
+                    st.info("Need Party (6) to rank trios. Generate a party first.")
                 elif len({str(pr["name"]) for _, pr in picks}) < 6:
-                    st.warning("Party must have **six distinct** Pokémon.")
+                    warn_with_fix("Party (6) has duplicates.", "replace duplicates or regenerate party.")
                 else:
                     br1, br2 = st.columns(2)
                     with br1:
@@ -1900,10 +1902,10 @@ with t3:
                         f"Estimated work: **{int(tb_box_rounds) * 20}** battle sims "
                         f"({int(tb_box_rounds)} rounds × 20 trios)."
                     )
-                    if st.button("Rank trios in Party (6)", key="tb_box_trios_run"):
+                    if st.button("Rank Party (6) trios", key="tb_box_trios_run"):
                         opp_fb = champs if tb_q_opp == "Champions (full dex)" else df
                         if opp_fb.empty or len(opp_fb) < 3:
-                            st.warning("Opponent pool too small for 3v3.")
+                            warn_with_fix("opponent pool is too small for 3v3.", "broaden filters or switch opponent pool.")
                         else:
                             party_rows_tb = [pr for _, pr in picks]
                             rng_tb = random.Random(int(tb_seed) + 90001)
@@ -1954,8 +1956,15 @@ with t3:
                                 pd.DataFrame(rows_df),
                                 hide_index=True,
                                 use_container_width=True,
+                                column_config={
+                                    "W": st.column_config.NumberColumn(format="%d"),
+                                    "L": st.column_config.NumberColumn(format="%d"),
+                                    "T": st.column_config.NumberColumn(format="%d"),
+                                    "Win %": st.column_config.NumberColumn(format="%.1f"),
+                                },
                             )
 
+            st.divider()
             st.markdown("#### Roster cards")
             ncols = 3
             for row_start in range(0, len(picks), ncols):
@@ -2029,7 +2038,7 @@ with t3:
                                 used_replacement_names=used_names,
                             )
                             if repl_row is None:
-                                st.warning(repl_reason)
+                                warn_with_fix(repl_reason, "try another slot or generate a new party.")
                             else:
                                 prev_names = list(st.session_state.get("tb_last_names", []))
                                 prev_roles = list(st.session_state.get("tb_last_roles", []))
@@ -2077,7 +2086,7 @@ with t3:
                         st.session_state["tb_last_swap_added_name"] = ""
                         st.rerun()
         except (KeyError, IndexError):
-            st.caption("Regenerate the team after changing sidebar filters (saved names left the roster).")
+            st.caption("Problem: saved names no longer match current filters. Fix: regenerate or clear the saved party.")
             if st.button("Clear saved team", key="tb_clear_saved"):
                 for k in (
                     "tb_last_names",
@@ -2096,6 +2105,7 @@ with t4:
         "Run ranked-style **3v3** sims for Champions / Legends Z-A.\n"
         "Use an Active team (3) or a Party (6) with random/oracle trio selection. Toy model, not cartridge/Showdown."
     )
+    st.divider()
 
     c_opt1, c_opt2 = st.columns(2)
     with c_opt1:
@@ -2131,7 +2141,7 @@ with t4:
     with s2:
         num_turns = st.number_input("Turns per battle", min_value=4, max_value=24, value=8, step=1)
     with s3:
-        seed_val = st.number_input("RNG seed", min_value=0, max_value=2_147_483_647, value=42, step=1)
+        seed_val = st.number_input("Randomizer code", min_value=0, max_value=2_147_483_647, value=42, step=1)
 
     opp_frame = champs if opponent_pool == "Champions (full dex)" else df
     pool_label = "Champions" if opponent_pool == "Champions (full dex)" else "filtered roster"
@@ -2171,9 +2181,9 @@ with t4:
             st.session_state[f"bs_dd_{_i}"] = "—"
 
     if opp_frame.empty or len(opp_frame) < ranked_battle_size:
-        st.warning(
-            f"Opponent pool ({pool_label}) needs at least **{ranked_battle_size}** Pokémon for ranked 3v3; "
-            "adjust filters or CSV."
+        warn_with_fix(
+            f"opponent pool ({pool_label}) needs at least {ranked_battle_size} Pokémon.",
+            "adjust sidebar filters or use a larger pool.",
         )
     else:
         my_opts = sorted(df["name"].astype(str).unique().tolist())
@@ -2188,12 +2198,12 @@ with t4:
             )
         else:
             st.caption(
-                "Use **Team Builder → Generate team (role bands + random)**, then **Apply last Team Builder team** here."
+                "Use Team Builder to generate Party (6), then use the button below."
             )
 
-        if st.button("Apply last Team Builder team", key="bs_apply_tb"):
+        if st.button("Use last Party (6) from Team Builder", key="bs_apply_tb"):
             if not tb or not tb.get("names"):
-                st.warning("Open **Team Builder** and generate a party first.")
+                warn_with_fix("no saved Team Builder party found.", "open Team Builder and generate Party (6).")
             else:
                 nms = list(tb["names"])
                 for i in range(6):
@@ -2307,8 +2317,15 @@ with t4:
                         ),
                         hide_index=True,
                         use_container_width=True,
+                        column_config={
+                            "W": st.column_config.NumberColumn(format="%d"),
+                            "L": st.column_config.NumberColumn(format="%d"),
+                            "T": st.column_config.NumberColumn(format="%d"),
+                            "Win %": st.column_config.NumberColumn(format="%.1f"),
+                        },
                     )
 
+        st.divider()
         with st.expander("Find best Active team (3) by win rate", expanded=False):
             st.caption(
                 "Searches Active team (3) candidates from your filtered roster.\n"
@@ -2360,16 +2377,16 @@ with t4:
                     f"(~**{n_combos * int(opt_battles_per_team)}** total battles). Ranked **3v3** only."
                 )
             elif R < search_team_size:
-                st.warning("Filtered roster is smaller than three; cannot search.")
+                warn_with_fix("filtered roster has fewer than 3 Pokémon.", "broaden filters before searching.")
             else:
                 st.info(
                     f"**Random search:** **{int(opt_random_trials)}** sampled **3-Pokémon** teams "
                     f"(C({R},{search_team_size}) = **{n_combos}** > **{int(max_exhaustive_combos)}** cap)."
                 )
 
-            if st.button("Run team search", type="secondary", key="opt_run_search"):
+            if st.button("Search best Active team (3)", type="secondary", key="opt_run_search"):
                 if R < search_team_size:
-                    st.error("Not enough Pokémon in the filtered roster.")
+                    st.error("Problem: not enough Pokémon in filtered roster. Fix: broaden filters.")
                 else:
                     rng_s = random.Random(int(seed_val) + 90210)
                     if use_exhaustive:
@@ -2488,7 +2505,7 @@ with t4:
             else:
                 st.caption(f"**Ready (active 3):** {', '.join(tn)}")
         else:
-            st.caption("Complete all slots to run battles, or apply from Team Builder.")
+            st.caption("Complete required slots to run battles, or import from Team Builder.")
 
         run_label = f"Run {int(num_battles)} battles"
         if st.button(run_label, type="primary", key="bs_run_battles"):
