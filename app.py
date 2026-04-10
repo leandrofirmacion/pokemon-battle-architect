@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import ast
 import json
+import math
 import random
 from pathlib import Path
 
@@ -299,16 +300,87 @@ def recommended_four_moves(row: pd.Series) -> list[str]:
     return out[:4]
 
 
-def row_has_super_effective_move(row: pd.Series, opponent_types: list[str]) -> bool:
+def wilson_score_interval(successes: int, n: int, z: float = 1.96) -> tuple[float, float]:
+    """Approximate binomial 95% CI (Wilson); returns (low, high) in [0, 1]."""
+    if n <= 0:
+        return (0.0, 0.0)
+    phat = successes / n
+    z2 = z * z
+    denom = 1 + z2 / n
+    center = (phat + z2 / (2 * n)) / denom
+    spread = z * math.sqrt((phat * (1 - phat) / n + z2 / (4 * n * n))) / denom
+    return (max(0.0, center - spread), min(1.0, center + spread))
+
+
+def moves_for_battle_sim(
+    row: pd.Series,
+    move_pool: str,
+    core4_cache: dict[str, list[str]],
+) -> list[str]:
+    """Moves considered for coverage scoring: full learnset (trimmed) or heuristic four."""
+    if move_pool == "Suggested 4 (heuristic)":
+        nm = str(row["name"])
+        if nm not in core4_cache:
+            core4_cache[nm] = recommended_four_moves(row)
+        return core4_cache[nm]
     moves = parse_list_cell(row.get("all_moves"))
+    if len(moves) > 55:
+        moves = list(dict.fromkeys(moves[:38] + moves[-17:]))
+    return [str(m) for m in moves]
+
+
+def best_type_effectiveness_vs(move_names: list[str], opponent_types: list[str]) -> float:
+    """Highest type chart multiplier among resolved moves vs defender types (minimum 1.0)."""
     opp = [t.lower() for t in opponent_types if t]
-    if not moves or not opp:
-        return False
-    for mv in moves:
+    if not move_names or not opp:
+        return 1.0
+    best = 1.0
+    for mv in move_names:
         mt = move_attack_type(str(mv))
-        if mt and type_multiplier(mt, opp) > 1.0:
-            return True
-    return False
+        if not mt:
+            continue
+        m = type_multiplier(mt, opp)
+        if m > best:
+            best = m
+    return best
+
+
+def run_coverage_battle(
+    my_rows: list[pd.Series],
+    opp_rows: list[pd.Series],
+    rng: random.Random,
+    *,
+    num_turns: int,
+    move_pool: str,
+    scoring: str,
+    core4_cache: dict[str, list[str]],
+) -> tuple[float, float, str]:
+    """
+    One abstract battle: random lane each turn, score from type effectiveness of movepool.
+    Returns (my_score, opp_score, outcome) with outcome in win, loss, tie.
+    """
+    my_pts = 0.0
+    opp_pts = 0.0
+    for _ in range(num_turns):
+        i = rng.randint(0, 2)
+        my_m = moves_for_battle_sim(my_rows[i], move_pool, core4_cache)
+        opp_m = moves_for_battle_sim(opp_rows[i], move_pool, core4_cache)
+        opp_types = parse_list_cell(opp_rows[i].get("types"))
+        my_types = parse_list_cell(my_rows[i].get("types"))
+        my_best = best_type_effectiveness_vs(my_m, opp_types)
+        opp_best = best_type_effectiveness_vs(opp_m, my_types)
+        if scoring == "Binary (1 pt if any super-effective)":
+            my_pts += 1.0 if my_best > 1.0 else 0.0
+            opp_pts += 1.0 if opp_best > 1.0 else 0.0
+        else:
+            my_pts += my_best if my_best > 1.0 else 0.0
+            opp_pts += opp_best if opp_best > 1.0 else 0.0
+
+    if my_pts > opp_pts:
+        return (my_pts, opp_pts, "win")
+    if opp_pts > my_pts:
+        return (my_pts, opp_pts, "loss")
+    return (my_pts, opp_pts, "tie")
 
 
 st.set_page_config(page_title="2026 Battle Architect", layout="wide", initial_sidebar_state="expanded")
@@ -659,36 +731,130 @@ with t3:
                             st.markdown(_team_builder_insight(role, prow))
 
 with t4:
-    st.subheader("Monte Carlo — vs Random Champions tier")
+    st.subheader("Monte Carlo — coverage simulator")
+    st.caption(
+        "Toy benchmark: each **turn** picks a random slot on both trios. Scores come from **type "
+        "effectiveness** of moves in the chosen pool (PokeAPI move types, **cached 24h**). "
+        "This is **not** a damage or speed simulator."
+    )
+
     champs = df_raw[df_raw["game_source"].astype(str).str.contains("Champions", case=False, na=False)]
-    if champs.empty:
-        st.warning("No Champions rows for opponent pool.")
+
+    c_opt1, c_opt2 = st.columns(2)
+    with c_opt1:
+        opponent_pool = st.selectbox(
+            "Opponent pool",
+            options=["Champions (full dex)", "Sidebar-filtered roster"],
+            index=0,
+            help="Where random opposing trios are sampled from.",
+        )
+    with c_opt2:
+        move_pool = st.selectbox(
+            "Moves considered",
+            options=["Suggested 4 (heuristic)", "Full learnset (trimmed if huge)"],
+            index=0,
+            help="Suggested 4 matches Team Builder heuristics. Full learnset caps at 55 moves "
+            "(head+tail) to limit PokeAPI calls.",
+        )
+
+    scoring = st.radio(
+        "Scoring",
+        options=[
+            "Binary (1 pt if any super-effective)",
+            "Weighted (add effectiveness: 2× or 4× per turn when SE)",
+        ],
+        horizontal=True,
+    )
+
+    s1, s2, s3 = st.columns(3)
+    with s1:
+        num_battles = st.number_input("Battles", min_value=20, max_value=5000, value=100, step=20)
+    with s2:
+        num_turns = st.number_input("Turns per battle", min_value=4, max_value=24, value=8, step=1)
+    with s3:
+        seed_val = st.number_input("RNG seed", min_value=0, max_value=2_147_483_647, value=42, step=1)
+
+    opp_frame = champs if opponent_pool == "Champions (full dex)" else df
+    pool_label = "Champions" if opponent_pool == "Champions (full dex)" else "filtered roster"
+
+    if opp_frame.empty or len(opp_frame) < 3:
+        st.warning(f"Opponent pool ({pool_label}) needs at least 3 Pokémon; adjust filters or CSV.")
     else:
         my_opts = sorted(df["name"].astype(str).unique().tolist())
         team3 = st.multiselect("Your team (pick 3)", options=my_opts, max_selections=3)
-        if len(team3) == 3 and st.button("Run 100 battles", type="primary"):
-            wins = 0
-            rng = random.Random(42)
+        run_label = f"Run {int(num_battles)} battles"
+        if len(team3) == 3 and st.button(run_label, type="primary"):
+            rng = random.Random(int(seed_val))
             my_rows = [df.loc[df["name"] == n].iloc[0] for n in team3]
+            core4_cache: dict[str, list[str]] = {}
+            for r in my_rows:
+                core4_cache[str(r["name"])] = recommended_four_moves(r)
+
+            wins = losses = ties = 0
+            battle_log: list[dict] = []
+            log_cap = min(25, max(5, int(num_battles) // 20))
+
             bar = st.progress(0)
-            for b in range(100):
-                opp_sample = champs.sample(3, random_state=rng.randint(0, 10_000_000))
-                opp_rows = [df_raw.loc[df_raw["name"] == on].iloc[0] for on in opp_sample["name"].tolist()]
-                my_pts, opp_pts = 0, 0
-                for _ in range(8):
-                    i = rng.randint(0, 2)
-                    opp_types = parse_list_cell(opp_rows[i].get("types"))
-                    my_types = parse_list_cell(my_rows[i].get("types"))
-                    if row_has_super_effective_move(my_rows[i], opp_types):
-                        my_pts += 1
-                    if row_has_super_effective_move(opp_rows[i], my_types):
-                        opp_pts += 1
-                if my_pts > opp_pts:
+            n_b = int(num_battles)
+            for b in range(n_b):
+                opp_sample = opp_frame.sample(3, random_state=rng.randint(0, 10_000_000))
+                onames = opp_sample["name"].tolist()
+                source = df_raw if opponent_pool == "Champions (full dex)" else df
+                opp_rows = [source.loc[source["name"] == on].iloc[0] for on in onames]
+                for r in opp_rows:
+                    nm = str(r["name"])
+                    if nm not in core4_cache:
+                        core4_cache[nm] = recommended_four_moves(r)
+
+                my_pts, opp_pts, outcome = run_coverage_battle(
+                    my_rows,
+                    opp_rows,
+                    rng,
+                    num_turns=int(num_turns),
+                    move_pool=move_pool,
+                    scoring=scoring,
+                    core4_cache=core4_cache,
+                )
+                if outcome == "win":
                     wins += 1
-                bar.progress((b + 1) / 100)
+                elif outcome == "loss":
+                    losses += 1
+                else:
+                    ties += 1
+
+                if len(battle_log) < log_cap:
+                    battle_log.append(
+                        {
+                            "#": b + 1,
+                            "result": outcome.upper(),
+                            "you": round(my_pts, 2),
+                            "opp": round(opp_pts, 2),
+                            "they": ", ".join(str(x) for x in onames),
+                        }
+                    )
+
+                bar.progress((b + 1) / n_b)
             bar.empty()
-            st.metric("Win percentage", f"{wins}%")
-            st.caption(
-                "100 battles vs random Champions trios. 8 turns/battle; random lane; "
-                "points if that Pokémon has a super-effective move (PokeAPI move type, cached 24h)."
+
+            win_rate = wins / n_b
+            lo, hi = wilson_score_interval(wins, n_b)
+            m1, m2, m3 = st.columns(3)
+            with m1:
+                st.metric("Wins", wins)
+            with m2:
+                st.metric("Losses", losses)
+            with m3:
+                st.metric("Ties", ties)
+            st.metric(
+                "Win rate",
+                f"{100 * win_rate:.1f}%",
+                help=f"Wilson 95% interval (wins only): {100 * lo:.1f}%–{100 * hi:.1f}%",
             )
+            st.caption(
+                f"{n_b} battles vs random **{pool_label}** trios · **{int(num_turns)}** turns/battle · "
+                f"seed **{int(seed_val)}** · **{move_pool.split()[0]}** moves · "
+                f"{'binary' if 'Binary' in scoring else 'weighted'} scoring."
+            )
+
+            with st.expander("Sample battle log (first battles in this run)"):
+                st.dataframe(pd.DataFrame(battle_log), hide_index=True, use_container_width=True)
