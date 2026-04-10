@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import ast
+import itertools
 import json
 import math
 import random
@@ -637,6 +638,58 @@ def run_coverage_battle(
     return (my_pts, opp_pts, "tie")
 
 
+def estimate_win_rate(
+    my_rows: list[pd.Series],
+    opp_frame: pd.DataFrame,
+    *,
+    opponent_champions_full_dex: bool,
+    df_roster: pd.DataFrame,
+    df_raw_data: pd.DataFrame,
+    team_size: int,
+    n_battles: int,
+    num_turns: int,
+    move_pool: str,
+    scoring: str,
+    rng: random.Random,
+) -> tuple[int, int, int]:
+    """
+    Run n_battles Monte Carlo matches vs random opponents from opp_frame.
+    Returns (wins, losses, ties). Mutates no Streamlit state.
+    """
+    source = df_raw_data if opponent_champions_full_dex else df_roster
+    core4_cache: dict[str, list[str]] = {}
+    for r in my_rows:
+        core4_cache[str(r["name"])] = recommended_four_moves(r)
+
+    wins = losses = ties = 0
+    for _ in range(n_battles):
+        opp_sample = opp_frame.sample(team_size, random_state=rng.randint(0, 10_000_000))
+        onames = opp_sample["name"].tolist()
+        opp_rows = [source.loc[source["name"] == on].iloc[0] for on in onames]
+        for r in opp_rows:
+            nm = str(r["name"])
+            if nm not in core4_cache:
+                core4_cache[nm] = recommended_four_moves(r)
+
+        _my_pts, _opp_pts, outcome = run_coverage_battle(
+            my_rows,
+            opp_rows,
+            rng,
+            num_turns=num_turns,
+            move_pool=move_pool,
+            scoring=scoring,
+            core4_cache=core4_cache,
+        )
+        if outcome == "win":
+            wins += 1
+        elif outcome == "loss":
+            losses += 1
+        else:
+            ties += 1
+
+    return wins, losses, ties
+
+
 st.set_page_config(page_title="Pokemon 2026 Macdro", layout="wide", initial_sidebar_state="expanded")
 st.title("Pokemon 2026 Macdro")
 st.caption("Pokémon Champions · Legends Z-A meta ledger")
@@ -1150,8 +1203,142 @@ with t4:
                 f"Pokémon {i + 1}",
                 options=sel_opts,
                 key=f"bs_dd_{i}",
-                help="Filtered roster from the sidebar.",
+                help="Filtered sidebar roster.",
             )
+
+        opponent_champions_full = opponent_pool == "Champions (full dex)"
+
+        with st.expander("Find best team by simulator win rate", expanded=False):
+            st.caption(
+                "Optimizes **this app’s toy simulator** only—not cartridge or Showdown. "
+                "**Random search** finds a strong team, not a proven global optimum on large rosters. "
+                "Many candidates reuse **PokeAPI** move data (**cached 24h**)."
+            )
+            ox1, ox2, ox3 = st.columns(3)
+            with ox1:
+                max_exhaustive_combos = st.number_input(
+                    "Max combos for exhaustive",
+                    min_value=20,
+                    max_value=5000,
+                    value=350,
+                    step=10,
+                    key="opt_max_exh",
+                    help="If C(roster, team size) ≤ this, every team is evaluated; otherwise random trials.",
+                )
+            with ox2:
+                opt_battles_per_team = st.number_input(
+                    "Battles per candidate",
+                    min_value=10,
+                    max_value=800,
+                    value=40,
+                    step=10,
+                    key="opt_bpt",
+                )
+            with ox3:
+                opt_random_trials = st.number_input(
+                    "Random trials (non-exhaustive)",
+                    min_value=5,
+                    max_value=400,
+                    value=48,
+                    step=4,
+                    key="opt_ntrials",
+                )
+
+            R = len(my_opts)
+            n_combos = math.comb(R, team_size) if R >= team_size else 0
+            use_exhaustive = n_combos > 0 and n_combos <= int(max_exhaustive_combos)
+            if use_exhaustive:
+                st.info(
+                    f"**Exhaustive:** **{n_combos}** teams × **{int(opt_battles_per_team)}** battles each "
+                    f"(~**{n_combos * int(opt_battles_per_team)}** total battles)."
+                )
+            elif R < team_size:
+                st.warning("Filtered roster is smaller than team size; cannot search.")
+            else:
+                st.info(
+                    f"**Random search:** **{int(opt_random_trials)}** sampled teams "
+                    f"(C({R},{team_size}) = **{n_combos}** > **{int(max_exhaustive_combos)}** cap)."
+                )
+
+            if st.button("Run team search", type="secondary", key="opt_run_search"):
+                if R < team_size:
+                    st.error("Not enough Pokémon in the filtered roster.")
+                else:
+                    rng_s = random.Random(int(seed_val) + 90210)
+                    if use_exhaustive:
+                        team_iter: list[tuple[str, ...]] = list(itertools.combinations(my_opts, team_size))
+                    else:
+                        cap_trials = min(int(opt_random_trials), n_combos)
+                        seen: set[tuple[str, ...]] = set()
+                        team_iter = []
+                        attempts = 0
+                        max_attempts = cap_trials * 80
+                        while len(team_iter) < cap_trials and attempts < max_attempts:
+                            attempts += 1
+                            draw = tuple(sorted(rng_s.sample(my_opts, team_size)))
+                            if draw not in seen:
+                                seen.add(draw)
+                                team_iter.append(draw)
+
+                    n_teams = len(team_iter)
+                    if n_teams == 0:
+                        st.error("No teams to evaluate.")
+                    else:
+                        best_names: tuple[str, ...] | None = None
+                        best_wins = -1
+                        best_losses = 0
+                        best_ties = 0
+
+                        with st.spinner(
+                            f"Searching **{n_teams}** teams × **{int(opt_battles_per_team)}** battles "
+                            f"(same scoring, moves, turns, and opponent pool as above)…"
+                        ):
+                            bar = st.progress(0)
+                            for ti, tnames in enumerate(team_iter):
+                                mrows = [df.loc[df["name"] == n].iloc[0] for n in tnames]
+                                w, loss_ct, tie_ct = estimate_win_rate(
+                                    mrows,
+                                    opp_frame,
+                                    opponent_champions_full_dex=opponent_champions_full,
+                                    df_roster=df,
+                                    df_raw_data=df_raw,
+                                    team_size=team_size,
+                                    n_battles=int(opt_battles_per_team),
+                                    num_turns=int(num_turns),
+                                    move_pool=move_pool,
+                                    scoring=scoring,
+                                    rng=rng_s,
+                                )
+                                if w > best_wins or (
+                                    w == best_wins and loss_ct < best_losses
+                                ):
+                                    best_wins = w
+                                    best_losses = loss_ct
+                                    best_ties = tie_ct
+                                    best_names = tnames
+                                bar.progress((ti + 1) / n_teams)
+                            bar.empty()
+
+                        if best_names is not None:
+                            nb = int(opt_battles_per_team)
+                            wr = best_wins / nb
+                            lo, hi = wilson_score_interval(best_wins, nb)
+                            st.success(
+                                f"**Best team:** {', '.join(best_names)} — "
+                                f"**{best_wins}**W / **{best_losses}**L / **{best_ties}**T "
+                                f"over **{nb}** battles each"
+                            )
+                            st.metric(
+                                "Best estimated win rate",
+                                f"{100 * wr:.1f}%",
+                                help=f"Wilson 95% interval (wins only): {100 * lo:.1f}%–{100 * hi:.1f}%",
+                            )
+                            st.caption(
+                                f"Search: **{'exhaustive' if use_exhaustive else 'random'}** · "
+                                f"**{n_teams}** teams · **{nb}** battles/team · "
+                                f"RNG **{int(seed_val) + 90210}** · opponent **{pool_label}** · "
+                                f"{BATTLE_SCORING_SUMMARY_LABEL.get(scoring, scoring)} scoring."
+                            )
 
         def _gather_my_team() -> tuple[list[str] | None, str | None]:
             names: list[str] = []
