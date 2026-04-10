@@ -1289,6 +1289,67 @@ def _team_offensive_stab_coverage(rows: list[pd.Series]) -> int:
     return len(_team_unique_types(rows))
 
 
+def suggest_best_replacement_for_party(
+    *,
+    picks: list[tuple[str, pd.Series]],
+    replace_idx: int,
+    roster_df: pd.DataFrame,
+    core4_cache: dict[str, list[str]],
+) -> tuple[pd.Series | None, str]:
+    """
+    Choose best available replacement for one slot using team-composition heuristics.
+    Returns (row, reason) or (None, reason).
+    """
+    if replace_idx < 0 or replace_idx >= len(picks):
+        return (None, "Invalid slot.")
+    base_rows = [r for _, r in picks]
+    base_names = {str(r["name"]) for r in base_rows}
+    if len(base_rows) < 2:
+        return (None, "Need at least two teammates to optimize composition.")
+
+    base_unique = len(_team_unique_types(base_rows))
+    base_weak = _max_team_weak_to_single_type(base_rows)
+    base_mix = team_move_class_mix(base_rows, "Suggested 4 (heuristic)", core4_cache)
+    base_tie = class_mix_tie_break(base_mix["team_balance"], base_mix["team_status_ratio"])
+
+    old_name = str(picks[replace_idx][1]["name"])
+    candidates = roster_df[~roster_df["name"].astype(str).isin(base_names - {old_name})]
+    if candidates.empty:
+        return (None, "No replacement candidates available in filtered roster.")
+
+    best_row: pd.Series | None = None
+    best_score = float("-inf")
+    best_reason = ""
+    team_len = len(base_rows)
+    target_unique = 6 if team_len >= 6 else min(3, team_len)
+    for _, cand in candidates.iterrows():
+        c_name = str(cand["name"])
+        if c_name == old_name:
+            continue
+        trial_rows = list(base_rows)
+        trial_rows[replace_idx] = cand
+        unique_now = len(_team_unique_types(trial_rows))
+        weak_now = _max_team_weak_to_single_type(trial_rows)
+        mix_now = team_move_class_mix(trial_rows, "Suggested 4 (heuristic)", core4_cache)
+        tie_now = class_mix_tie_break(mix_now["team_balance"], mix_now["team_status_ratio"])
+
+        coverage_gain = unique_now - base_unique
+        weak_impr = base_weak - weak_now
+        class_gain = tie_now - base_tie
+        target_bonus = 1.0 if unique_now >= target_unique else 0.0
+        score = 0.35 * coverage_gain + 0.30 * weak_impr + 0.25 * class_gain + 0.10 * target_bonus
+        if score > best_score:
+            best_score = score
+            best_row = cand
+            best_reason = (
+                f"+{coverage_gain} unique types, weakness spread delta {weak_impr:+}, "
+                f"class-mix delta {class_gain:+.3f}"
+            )
+    if best_row is None:
+        return (None, "No better replacement found.")
+    return (best_row, best_reason)
+
+
 def generate_role_band_team(
     p: pd.DataFrame,
     mode: str,
@@ -1466,7 +1527,7 @@ with t3:
     sg1, sg2 = st.columns([2, 1])
     with sg1:
         tb_seed = st.number_input(
-            "RNG seed (same seed + filters = reproducible; change for a new roll)",
+            "Randomizer code (same code + filters = same party)",
             min_value=0,
             max_value=2_147_483_647,
             value=int(st.session_state.get("tb_seed_val", 4242)),
@@ -1496,7 +1557,7 @@ with t3:
         key="tb_pref_weak",
     )
     pref_type_div = st.checkbox(
-        "Prefer type diversity — retry until **≥3** unique typings on the team",
+        "Prefer type diversity — require **≥6** unique type slots across Party (6); dual-type overlap allowed",
         value=True,
         key="tb_pref_div",
     )
@@ -1535,7 +1596,7 @@ with t3:
                 rows_only = [pr for _, pr in cand]
                 if pref_weak_spread and _max_team_weak_to_single_type(rows_only) > 2:
                     continue
-                if pref_type_div and len(_team_unique_types(rows_only)) < min(3, len(rows_only)):
+                if pref_type_div and len(_team_unique_types(rows_only)) < 6:
                     continue
                 picks = cand
                 break
@@ -1584,7 +1645,7 @@ with t3:
 
             st.info(
                 f"**Speedster:** Speed > **{thr_speed}** · **Tank:** HP or Def > **{thr_bulk}** · "
-                f"**Heavy:** Atk or Sp. Atk > **{thr_off}** · seed **{int(tb_seed)}**. "
+                f"**Heavy:** Atk or Sp. Atk > **{thr_off}** · randomizer code **{int(tb_seed)}**. "
                 f"Constraints: **weak spread** {'on' if pref_weak_spread else 'off'}, "
                 f"**type diversity** {'on' if pref_type_div else 'off'}."
             )
@@ -1810,7 +1871,9 @@ with t3:
             for row_start in range(0, len(picks), ncols):
                 row_slice = picks[row_start : row_start + ncols]
                 cols = st.columns(ncols)
-                for col, (role, prow) in zip(cols, row_slice):
+                for col, local_i in zip(cols, range(len(row_slice))):
+                    role, prow = row_slice[local_i]
+                    team_i = row_start + local_i
                     with col:
                         if pd.notna(prow.get("image_url")):
                             st.image(str(prow["image_url"]), use_container_width=True)
@@ -1866,8 +1929,51 @@ with t3:
                                         st.caption("—")
                         else:
                             st.caption("No moves resolved (check network / PokeAPI).")
+                        if st.button("Replace with best fit", key=f"tb_replace_{team_i}_{prow['name']}"):
+                            repl_row, repl_reason = suggest_best_replacement_for_party(
+                                picks=picks,
+                                replace_idx=team_i,
+                                roster_df=df,
+                                core4_cache=core4_by_name,
+                            )
+                            if repl_row is None:
+                                st.warning(repl_reason)
+                            else:
+                                prev_names = list(st.session_state.get("tb_last_names", []))
+                                prev_roles = list(st.session_state.get("tb_last_roles", []))
+                                st.session_state["tb_prev_names"] = prev_names
+                                st.session_state["tb_prev_roles"] = prev_roles
+                                picks[team_i] = (role, repl_row)
+                                st.session_state["tb_last_names"] = [str(r["name"]) for _, r in picks]
+                                st.session_state["tb_last_roles"] = [r for r, _ in picks]
+                                nm_new = str(repl_row["name"])
+                                if nm_new not in core4_by_name:
+                                    core4_by_name[nm_new] = recommended_four_moves(repl_row)
+                                st.session_state["tb_core4"] = core4_by_name
+                                st.session_state["last_built_team"] = {
+                                    "format": "party_6",
+                                    "names": st.session_state["tb_last_names"],
+                                }
+                                st.session_state["tb_last_swap_msg"] = (
+                                    f"Replaced {prow['name']} -> {nm_new} ({repl_reason})."
+                                )
+                                st.rerun()
                         with st.expander("Why this Pokémon"):
                             st.markdown(_team_builder_insight(role, prow))
+            if st.session_state.get("tb_last_swap_msg"):
+                st.success(str(st.session_state["tb_last_swap_msg"]))
+                if st.button("Undo last swap", key="tb_undo_last_swap"):
+                    old_n = st.session_state.get("tb_prev_names")
+                    old_r = st.session_state.get("tb_prev_roles")
+                    if old_n and old_r and len(old_n) == len(old_r):
+                        st.session_state["tb_last_names"] = list(old_n)
+                        st.session_state["tb_last_roles"] = list(old_r)
+                        st.session_state["last_built_team"] = {
+                            "format": "party_6",
+                            "names": list(old_n),
+                        }
+                        st.session_state["tb_last_swap_msg"] = "Undo complete."
+                        st.rerun()
         except (KeyError, IndexError):
             st.caption("Regenerate the team after changing sidebar filters (saved names left the roster).")
             if st.button("Clear saved team", key="tb_clear_saved"):
