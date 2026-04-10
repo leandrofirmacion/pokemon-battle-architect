@@ -411,6 +411,148 @@ def best_type_effectiveness_vs(move_names: list[str], opponent_types: list[str])
     return best
 
 
+# --- Battle sim: competitive assumptions (VGC-style Lv 50, perfect IV/EV, speed-boosting nature) ---
+
+COMPETITIVE_BATTLE_LEVEL = 50
+COMPETITIVE_IV = 31
+# 252 offensive / 252 Speed / 4 HP; nature +Speed −Atk (Timid) or −Sp.Atk (Jolly)
+SCORING_BINARY = "Binary (1 pt if any super-effective)"
+SCORING_WEIGHTED = "Weighted (add effectiveness: 2× or 4× per turn when SE)"
+SCORING_COMPETITIVE = (
+    "Competitive EV/IV (Lv 50: 31 IV, 252/252/4 + Speed nature — damage stub × speed)"
+)
+
+
+def _nature_mults(plus: str, minus: str) -> dict[str, float]:
+    keys = ("hp", "attack", "defense", "sp_attack", "sp_defense", "speed")
+    m = dict.fromkeys(keys, 1.0)
+    if plus in m:
+        m[plus] = 1.1
+    if minus in m:
+        m[minus] = 0.9
+    return m
+
+
+@st.cache_data(ttl=86400, show_spinner=False)
+def competitive_final_stats_cached(
+    name: str,
+    b_hp: int,
+    b_atk: int,
+    b_def: int,
+    b_spa: int,
+    b_spd: int,
+    b_spe: int,
+) -> tuple[int, int, int, int, int, int]:
+    """
+    Final stats at COMPETITIVE_BATTLE_LEVEL with 31 IVs, 252/252/4 EVs,
+    and Timid (+Spe −Atk) if special-leaning else Jolly (+Spe −SpA).
+    """
+    L = COMPETITIVE_BATTLE_LEVEL
+    iv = COMPETITIVE_IV
+    if b_atk >= b_spa:
+        ev = {"hp": 4, "attack": 252, "defense": 0, "sp_attack": 0, "sp_defense": 0, "speed": 252}
+        nm = _nature_mults("speed", "sp_attack")
+    else:
+        ev = {"hp": 4, "attack": 0, "defense": 0, "sp_attack": 252, "sp_defense": 0, "speed": 252}
+        nm = _nature_mults("speed", "attack")
+
+    def ev_s(stat: str) -> int:
+        return int(ev.get(stat, 0))
+
+    hp = math.floor((2 * b_hp + iv + math.floor(ev_s("hp") / 4)) * L / 100) + L + 10
+
+    def other(base: int, stat: str) -> int:
+        inner = math.floor((2 * base + iv + math.floor(ev_s(stat) / 4)) * L / 100) + 5
+        return math.floor(inner * nm[stat])
+
+    atk = other(b_atk, "attack")
+    defense = other(b_def, "defense")
+    spa = other(b_spa, "sp_attack")
+    spd = other(b_spd, "sp_defense")
+    spe = other(b_spe, "speed")
+    return (hp, atk, defense, spa, spd, spe)
+
+
+def competitive_final_stats_from_row(row: pd.Series) -> dict[str, int]:
+    t = competitive_final_stats_cached(
+        str(row["name"]),
+        int(row["hp"]),
+        int(row["attack"]),
+        int(row["defense"]),
+        int(row["sp_attack"]),
+        int(row["sp_defense"]),
+        int(row["speed"]),
+    )
+    return {
+        "hp": t[0],
+        "attack": t[1],
+        "defense": t[2],
+        "sp_attack": t[3],
+        "sp_defense": t[4],
+        "speed": t[5],
+    }
+
+
+def _damage_stub_simple(level: int, power: int, atk_stat: int, def_stat: int) -> int:
+    """Gen V–style physical/special damage before STAB and type chart."""
+    a, d = max(1, atk_stat), max(1, def_stat)
+    return math.floor(math.floor((2 * level / 5 + 2) * power * a / d) / 50) + 2
+
+
+def _speed_tie_multiplier(attacker_speed: int, defender_speed: int) -> float:
+    if attacker_speed > defender_speed:
+        return 1.05
+    if attacker_speed < defender_speed:
+        return 0.95
+    return 1.0
+
+
+def best_competitive_turn_score(
+    move_names: list[str],
+    attacker_types: list[str],
+    defender_types: list[str],
+    a_stats: dict[str, int],
+    d_stats: dict[str, int],
+    level: int,
+) -> float:
+    """
+    Max approximate damage across moves using competitive final stats, STAB, and type chart.
+    Status moves contribute a small pressure score. Result is scaled by caller for speed.
+    """
+    atk_t = [t.lower() for t in attacker_types if t]
+    def_t = [t.lower() for t in defender_types if t]
+    if not move_names or not def_t:
+        return 0.0
+
+    best = 0.0
+    for mv in move_names:
+        det = move_pokeapi_details(str(mv))
+        if not det:
+            continue
+        mt = (det.get("type") or "").lower()
+        power = det.get("power")
+        dc = (det.get("damage_class") or "status").lower()
+
+        if power is None or int(power) <= 0 or dc == "status":
+            best = max(best, _status_move_priority(str(mv)) * 0.12)
+            continue
+
+        pw = int(power)
+        if dc == "physical":
+            raw = _damage_stub_simple(level, pw, a_stats["attack"], d_stats["defense"])
+        elif dc == "special":
+            raw = _damage_stub_simple(level, pw, a_stats["sp_attack"], d_stats["sp_defense"])
+        else:
+            best = max(best, _status_move_priority(str(mv)) * 0.12)
+            continue
+
+        stab = 1.5 if mt in atk_t else 1.0
+        tmult = type_multiplier(mt, def_t)
+        best = max(best, float(raw) * stab * tmult)
+
+    return best
+
+
 def run_coverage_battle(
     my_rows: list[pd.Series],
     opp_rows: list[pd.Series],
@@ -422,8 +564,8 @@ def run_coverage_battle(
     core4_cache: dict[str, list[str]],
 ) -> tuple[float, float, str]:
     """
-    One abstract battle: random lane each turn, score from type effectiveness of movepool.
-    Returns (my_score, opp_score, outcome) with outcome in win, loss, tie.
+    Random active slot each turn. Binary/Weighted: type-chart effectiveness only.
+    Competitive: Lv 50 + 31 IV + 252/252/4 + speed nature; damage stub × speed tie.
     """
     n_team = len(my_rows)
     if n_team < 1 or len(opp_rows) != n_team:
@@ -440,9 +582,33 @@ def run_coverage_battle(
         my_types = parse_list_cell(my_rows[i].get("types"))
         my_best = best_type_effectiveness_vs(my_m, opp_types)
         opp_best = best_type_effectiveness_vs(opp_m, my_types)
-        if scoring == "Binary (1 pt if any super-effective)":
+        if scoring == SCORING_BINARY:
             my_pts += 1.0 if my_best > 1.0 else 0.0
             opp_pts += 1.0 if opp_best > 1.0 else 0.0
+        elif scoring == SCORING_WEIGHTED:
+            my_pts += my_best if my_best > 1.0 else 0.0
+            opp_pts += opp_best if opp_best > 1.0 else 0.0
+        elif scoring == SCORING_COMPETITIVE:
+            my_cs = competitive_final_stats_from_row(my_rows[i])
+            opp_cs = competitive_final_stats_from_row(opp_rows[i])
+            raw_my = best_competitive_turn_score(
+                my_m,
+                my_types,
+                opp_types,
+                my_cs,
+                opp_cs,
+                COMPETITIVE_BATTLE_LEVEL,
+            )
+            raw_opp = best_competitive_turn_score(
+                opp_m,
+                opp_types,
+                my_types,
+                opp_cs,
+                my_cs,
+                COMPETITIVE_BATTLE_LEVEL,
+            )
+            my_pts += raw_my * _speed_tie_multiplier(my_cs["speed"], opp_cs["speed"])
+            opp_pts += raw_opp * _speed_tie_multiplier(opp_cs["speed"], my_cs["speed"])
         else:
             my_pts += my_best if my_best > 1.0 else 0.0
             opp_pts += opp_best if opp_best > 1.0 else 0.0
@@ -863,9 +1029,10 @@ with t3:
 with t4:
     st.subheader("Monte Carlo — coverage simulator")
     st.caption(
-        "Toy benchmark: each **turn** picks a random slot on both teams (3v3 or 6v6). Scores come from **type "
-        "effectiveness** of moves in the chosen pool (PokeAPI move types, **cached 24h**). "
-        "This is **not** a damage or speed simulator."
+        "Each **turn** picks a random slot on both teams (3v3 or 6v6). **Binary / Weighted** use only type "
+        "effectiveness (PokeAPI move types, **cached 24h**). **Competitive EV/IV** adds **Lv 50** stats with "
+        "**31 IV**, **252 / 252 / 4** EVs, **Timid** (special) or **Jolly** (physical), then a **damage stub** "
+        "(STAB + type chart) scaled by **Speed** (+5% faster, −5% slower)."
     )
 
     champs = df_raw[df_raw["game_source"].astype(str).str.contains("Champions", case=False, na=False)]
@@ -889,10 +1056,7 @@ with t4:
 
     scoring = st.radio(
         "Scoring",
-        options=[
-            "Binary (1 pt if any super-effective)",
-            "Weighted (add effectiveness: 2× or 4× per turn when SE)",
-        ],
+        options=[SCORING_BINARY, SCORING_WEIGHTED, SCORING_COMPETITIVE],
         horizontal=True,
     )
 
@@ -1060,7 +1224,7 @@ with t4:
                     f"{n_b} battles vs random **{pool_label}** **{team_size}v{team_size}** teams · "
                     f"**{int(num_turns)}** turns/battle · seed **{int(seed_val)}** · "
                     f"**{move_pool.split()[0]}** moves · "
-                    f"{'binary' if 'Binary' in scoring else 'weighted'} scoring."
+                    f"**{'binary' if scoring == SCORING_BINARY else 'weighted' if scoring == SCORING_WEIGHTED else 'competitive Lv50'}** scoring."
                 )
 
                 with st.expander("Sample battle log (first battles in this run)"):
