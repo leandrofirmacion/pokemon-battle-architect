@@ -107,6 +107,28 @@ def type_multiplier(attack_type: str, defend_types: list[str]) -> float:
     return mult
 
 
+# Canonical order for type filter dropdown (matches main-series conventions)
+TYPE_FILTER_ORDER = [
+    "normal",
+    "fire",
+    "water",
+    "electric",
+    "grass",
+    "ice",
+    "fighting",
+    "poison",
+    "ground",
+    "flying",
+    "psychic",
+    "bug",
+    "rock",
+    "ghost",
+    "dragon",
+    "dark",
+    "steel",
+    "fairy",
+]
+
 TYPE_COLORS = {
     "normal": "#A8A878",
     "fire": "#F08030",
@@ -324,10 +346,28 @@ t1, t2, t3, t4 = st.tabs(["DEX Analyzer", "Movepool Inspector", "Team Builder", 
 
 with t1:
     st.subheader("The Ledger")
-    search = st.text_input("Search roster", placeholder="Filter by name…")
+    col_search, col_type = st.columns(2)
+    with col_search:
+        search = st.text_input("Search roster", placeholder="Filter by name…")
+    with col_type:
+        type_choices = ["All types"] + [t.title() for t in TYPE_FILTER_ORDER]
+        type_filter = st.selectbox(
+            "Filter by type",
+            options=type_choices,
+            index=0,
+            help="Show Pokémon that include this type (primary or secondary).",
+        )
+
     show = df.copy()
     if search.strip():
         show = show[show["name"].astype(str).str.contains(search.strip(), case=False, na=False)]
+    if type_filter != "All types":
+        needle = type_filter.lower()
+
+        def _row_has_type(cell) -> bool:
+            return needle in [x.lower() for x in parse_list_cell(cell)]
+
+        show = show[show["types"].apply(_row_has_type)]
     disp = [c for c in show.columns if c != "all_moves"]
     st.dataframe(
         show[disp],
