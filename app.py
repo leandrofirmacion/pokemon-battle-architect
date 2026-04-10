@@ -1011,8 +1011,9 @@ def apply_sidebar_filters(
     type_selection: list[str],
     mega_mode: str,
     game_type_mode: str,
+    special_class_selection: list[str],
 ) -> pd.DataFrame:
-    """Apply type, mega, and game-type filters (after game version)."""
+    """Apply type, mega, game-type, and special-class filters (after game version)."""
     out = frame.copy()
     if type_selection:
         needles = {t.lower() for t in type_selection}
@@ -1027,6 +1028,16 @@ def apply_sidebar_filters(
         out = out[~out["is_mega"].astype(bool)]
     if game_type_mode != "Any":
         out = out[out["game_source"].apply(lambda s: match_game_type_mode(str(s), game_type_mode))]
+    if special_class_selection:
+        mask = pd.Series(False, index=out.index)
+        selected = {s.lower() for s in special_class_selection}
+        if "legendary" in selected:
+            mask = mask | out["is_legendary"].astype(bool)
+        if "mythical" in selected:
+            mask = mask | out["is_mythical"].astype(bool)
+        if "ultra beast" in selected:
+            mask = mask | out["is_ultra_beast"].astype(bool)
+        out = out[mask]
     return out
 
 
@@ -1082,6 +1093,13 @@ with st.sidebar:
         key="side_mega_pick",
         help="Filter by Mega Evolution rows (is_mega).",
     )
+    special_class_pick = st.multiselect(
+        "Special class",
+        options=["Legendary", "Mythical", "Ultra Beast"],
+        default=[],
+        key="side_special_class_pick",
+        help="Keep only Pokémon that match any selected class.",
+    )
     with st.expander("Advanced filters", expanded=False):
         game_pick = st.multiselect(
             "Game version",
@@ -1100,7 +1118,7 @@ with st.sidebar:
 
 
 df_base = filter_by_games(df_raw, game_pick)
-df = apply_sidebar_filters(df_base, type_pick, mega_pick, game_type_pick)
+df = apply_sidebar_filters(df_base, type_pick, mega_pick, game_type_pick, special_class_pick)
 if df.empty:
     st.warning("No rows match the selected sidebar filters.")
     st.stop()
