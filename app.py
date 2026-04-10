@@ -389,6 +389,100 @@ def confidence_badge(sample_size: int) -> str:
     return "Quick"
 
 
+def clamp01(x: float) -> float:
+    return max(0.0, min(1.0, float(x)))
+
+
+def move_profile_from_moves(move_names: list[str]) -> dict[str, float]:
+    """Physical/special/status counts + power splits + balance ratios."""
+    phys = spec = status = 0
+    phys_pow = spec_pow = 0.0
+    for mv in move_names:
+        det = move_pokeapi_details(str(mv))
+        if not det:
+            continue
+        dc = (det.get("damage_class") or "status").lower()
+        pw = det.get("power")
+        pwr = float(int(pw)) if pw is not None and int(pw) > 0 else 0.0
+        if dc == "physical":
+            phys += 1
+            phys_pow += pwr
+        elif dc == "special":
+            spec += 1
+            spec_pow += pwr
+        else:
+            status += 1
+    total = phys + spec + status
+    offense_balance = 1.0 - abs(phys_pow - spec_pow) / (phys_pow + spec_pow + 1.0)
+    status_ratio = status / max(1, total)
+    return {
+        "phys_count": float(phys),
+        "spec_count": float(spec),
+        "status_count": float(status),
+        "phys_power_sum": phys_pow,
+        "spec_power_sum": spec_pow,
+        "offense_class_balance": clamp01(offense_balance),
+        "status_ratio": clamp01(status_ratio),
+        "total_moves": float(total),
+    }
+
+
+def team_move_class_mix(
+    rows: list[pd.Series],
+    move_pool: str,
+    core4_cache: dict[str, list[str]],
+) -> dict[str, float]:
+    """Aggregate class mix for a team using the same move pool mode as battle sim."""
+    team_moves: list[str] = []
+    for r in rows:
+        team_moves.extend(moves_for_battle_sim(r, move_pool, core4_cache))
+    prof = move_profile_from_moves(team_moves)
+    team_balance = 1.0 - abs(prof["phys_power_sum"] - prof["spec_power_sum"]) / (
+        prof["phys_power_sum"] + prof["spec_power_sum"] + 1.0
+    )
+    return {
+        "team_balance": clamp01(team_balance),
+        "team_status_ratio": clamp01(prof["status_ratio"]),
+        "team_phys_power_sum": prof["phys_power_sum"],
+        "team_spec_power_sum": prof["spec_power_sum"],
+        "team_status_count": prof["status_count"],
+        "team_total_moves": prof["total_moves"],
+    }
+
+
+def class_mix_tie_break(team_balance: float, status_ratio: float) -> float:
+    return 0.7 * clamp01(team_balance) + 0.3 * clamp01(status_ratio / 0.30)
+
+
+def best_type_effectiveness_with_class_boost(
+    move_names: list[str],
+    opponent_types: list[str],
+    attacker_row: pd.Series,
+) -> float:
+    """
+    Like best_type_effectiveness_vs, with +3% boost when move class matches attacker lean.
+    Applies only for non-competitive scoring modes.
+    """
+    opp = [t.lower() for t in opponent_types if t]
+    if not move_names or not opp:
+        return 1.0
+    atk, spa = int(attacker_row["attack"]), int(attacker_row["sp_attack"])
+    best = 1.0
+    for mv in move_names:
+        det = move_pokeapi_details(str(mv))
+        if not det:
+            continue
+        mt = (det.get("type") or "").lower()
+        dc = (det.get("damage_class") or "status").lower()
+        m = type_multiplier(mt, opp)
+        # Tiny nudge so class-fit matters but does not dominate type advantage.
+        if (dc == "physical" and atk >= spa) or (dc == "special" and spa > atk):
+            m *= 1.03
+        if m > best:
+            best = m
+    return best
+
+
 def render_rules_summary(
     *,
     format_label: str,
@@ -623,8 +717,8 @@ def run_coverage_battle(
         opp_m = moves_for_battle_sim(opp_rows[i], move_pool, core4_cache)
         opp_types = parse_list_cell(opp_rows[i].get("types"))
         my_types = parse_list_cell(my_rows[i].get("types"))
-        my_best = best_type_effectiveness_vs(my_m, opp_types)
-        opp_best = best_type_effectiveness_vs(opp_m, my_types)
+        my_best = best_type_effectiveness_with_class_boost(my_m, opp_types, my_rows[i])
+        opp_best = best_type_effectiveness_with_class_boost(opp_m, my_types, opp_rows[i])
         if scoring == SCORING_STANDARD:
             my_pts += 1.0 if my_best > 1.0 else 0.0
             opp_pts += 1.0 if opp_best > 1.0 else 0.0
@@ -1116,9 +1210,24 @@ with t2:
     st.markdown(" ".join(type_badge_html(t) for t in types), unsafe_allow_html=True)
     moves = parse_list_cell(prow.get("all_moves"))
     st.write(f"**{len(moves)} moves** in learnset")
+    move_profile = move_profile_from_moves([str(m) for m in moves])
+    mp1, mp2, mp3, mp4 = st.columns(4)
+    with mp1:
+        st.metric("Physical", int(move_profile["phys_count"]))
+    with mp2:
+        st.metric("Special", int(move_profile["spec_count"]))
+    with mp3:
+        st.metric("Status", int(move_profile["status_count"]))
+    with mp4:
+        st.metric("Class balance", f"{move_profile['offense_class_balance']:.2f}")
     cols = st.columns(4)
     for i, mv in enumerate(moves):
         with cols[i % 4]:
+            det = move_pokeapi_details(str(mv))
+            dc = ((det or {}).get("damage_class") or "status").title()
+            pw = (det or {}).get("power")
+            pw_txt = str(int(pw)) if pw is not None and int(pw) > 0 else "—"
+            st.caption(f"{dc} · Pow {pw_txt}")
             st.button(str(mv), key=f"mv_{q}_{i}", disabled=True, use_container_width=True)
 
 
@@ -1302,6 +1411,16 @@ def render_team_builder_summary(picks: list[tuple[str, pd.Series]], core4_by_nam
         st.metric("Max weak to one type", _max_team_weak_to_single_type(rows))
     with c3:
         st.metric("Offensive type diversity", _team_offensive_stab_coverage(rows))
+    class_mix = team_move_class_mix(rows, "Suggested 4 (heuristic)", core4_by_name)
+    c4, c5 = st.columns(2)
+    with c4:
+        st.metric("Class balance", f"{class_mix['team_balance']:.2f}")
+    with c5:
+        st.metric("Status ratio", f"{100 * class_mix['team_status_ratio']:.0f}%")
+    if class_mix["team_balance"] < 0.65:
+        st.warning("Class mix is skewed (physical vs special). Target balance is at least 0.65.")
+    if not (0.15 <= class_mix["team_status_ratio"] <= 0.45):
+        st.warning("Status ratio is outside target band (15% to 45%).")
 
     weak_lines: list[str] = []
     for atk in TYPE_FILTER_ORDER:
@@ -1980,6 +2099,12 @@ with t4:
                 "Searches Active team (3) candidates from your filtered roster.\n"
                 "Optimizes this app's toy simulator only (not cartridge/Showdown)."
             )
+            use_class_mix_tiebreak = st.checkbox(
+                "Use class-mix tie-breaker (balance + status ratio)",
+                value=True,
+                key="opt_use_class_mix",
+                help="If wins/losses tie, prefer teams with better physical/special balance and status mix.",
+            )
             ox1, ox2, ox3 = st.columns(3)
             with ox1:
                 max_exhaustive_combos = st.number_input(
@@ -2055,6 +2180,8 @@ with t4:
                         best_wins = -1
                         best_losses = 0
                         best_ties = 0
+                        best_tiebreak = -1.0
+                        core4_cache_search: dict[str, list[str]] = {}
 
                         with st.spinner(
                             f"Searching **{n_teams}** trios × **{int(opt_battles_per_team)}** battles "
@@ -2076,13 +2203,23 @@ with t4:
                                     scoring=scoring,
                                     rng=rng_s,
                                 )
+                                cmix = team_move_class_mix(mrows, move_pool, core4_cache_search)
+                                tiebreak = class_mix_tie_break(cmix["team_balance"], cmix["team_status_ratio"])
                                 if w > best_wins or (
-                                    w == best_wins and loss_ct < best_losses
+                                    w == best_wins and (
+                                        loss_ct < best_losses
+                                        or (
+                                            loss_ct == best_losses
+                                            and use_class_mix_tiebreak
+                                            and tiebreak > best_tiebreak
+                                        )
+                                    )
                                 ):
                                     best_wins = w
                                     best_losses = loss_ct
                                     best_ties = tie_ct
                                     best_names = tnames
+                                    best_tiebreak = tiebreak
                                 bar.progress((ti + 1) / n_teams)
                             bar.empty()
 
@@ -2110,6 +2247,8 @@ with t4:
                                 f"RNG **{int(seed_val) + 90210}** · opponent **{pool_label}** · "
                                 f"{BATTLE_SCORING_SUMMARY_LABEL.get(scoring, scoring)} scoring."
                             )
+                            if use_class_mix_tiebreak:
+                                st.caption(f"Class-mix tie-break score (winner): **{best_tiebreak:.3f}**")
 
         def _gather_my_team() -> tuple[list[str] | None, str | None]:
             names: list[str] = []
