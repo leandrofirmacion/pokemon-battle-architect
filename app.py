@@ -27,17 +27,6 @@ def resolve_csv_path() -> Path | None:
     return None
 
 
-def resolve_name_from_roster(typed: str, name_series: pd.Series) -> str | None:
-    """Case-insensitive exact match against roster display names; returns canonical CSV name."""
-    t = typed.strip().lower()
-    if not t:
-        return None
-    for canon in name_series.astype(str).unique():
-        if str(canon).strip().lower() == t:
-            return str(canon)
-    return None
-
-
 def parse_list_cell(val) -> list:
     if val is None or (isinstance(val, float) and pd.isna(val)):
         return []
@@ -316,11 +305,11 @@ LEDGER_HIDDEN_COLS = frozenset({"all_moves", "national_dex_hint", "pokemon_id"})
 
 def ledger_column_order(columns: list[str]) -> list[str]:
     """
-    Leading columns: PokéAPI id, name, art (image_url), Moveset; then the rest in source order.
+    Leading columns: PokéAPI id, name, art (image_url), types, Moveset; then the rest in source order.
     """
     cols_list = list(columns)
     colset = set(cols_list)
-    preferred = ("pokeapi_id", "name", "image_url", "Moveset")
+    preferred = ("pokeapi_id", "name", "image_url", "types", "Moveset")
     ordered: list[str] = []
     for p in preferred:
         if p in colset:
@@ -921,9 +910,7 @@ with t4:
     bs_format = st.radio("Your format", ["3v3", "6v6"], horizontal=True, key="bs_format")
     team_size = 3 if bs_format == "3v3" else 6
 
-    if "bs_txt_0" not in st.session_state:
-        st.session_state["bs_txt_0"] = ""
-    for _i in range(1, 6):
+    for _i in range(6):
         if f"bs_dd_{_i}" not in st.session_state:
             st.session_state[f"bs_dd_{_i}"] = "—"
 
@@ -960,7 +947,7 @@ with t4:
                     st.warning(
                         f"Team Builder only has **{len(nms)}** Pokémon; fill remaining slots manually."
                     )
-                st.session_state["bs_txt_0"] = nms[0] if nms else ""
+                st.session_state["bs_dd_0"] = nms[0] if nms and nms[0] in my_opts else blank
                 for i in range(1, 6):
                     if i < team_size:
                         if i < len(nms):
@@ -972,28 +959,17 @@ with t4:
                         st.session_state[f"bs_dd_{i}"] = blank
                 st.rerun()
 
-        st.text_input(
-            "Pokémon 1",
-            key="bs_txt_0",
-            placeholder="Type roster name (case ignored)…",
-            help="Must match a name from the filtered roster exactly (ignoring case).",
-        )
-        for i in range(1, team_size):
+        for i in range(team_size):
             st.selectbox(
                 f"Pokémon {i + 1}",
                 options=sel_opts,
                 key=f"bs_dd_{i}",
+                help="Filtered roster from the sidebar.",
             )
 
         def _gather_my_team() -> tuple[list[str] | None, str | None]:
-            raw0 = st.session_state.get("bs_txt_0", "")
-            if not str(raw0).strip():
-                return None, "Enter **Pokémon 1** by name."
-            r0 = resolve_name_from_roster(str(raw0), df["name"])
-            if r0 is None:
-                return None, f"Pokémon 1 **{str(raw0).strip()!r}** is not in the filtered roster."
-            names: list[str] = [r0]
-            for i in range(1, team_size):
+            names: list[str] = []
+            for i in range(team_size):
                 sel = st.session_state.get(f"bs_dd_{i}", blank)
                 if not sel or sel == blank:
                     return None, f"Choose **Pokémon {i + 1}** from the dropdown."
