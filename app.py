@@ -515,10 +515,50 @@ with t3:
                         core4 = core4_by_name.get(str(prow["name"]), [])
                         st.markdown("**Suggested 4 moves**")
                         if core4:
-                            mv_cols = st.columns(4)
-                            for i, mv in enumerate(core4):
-                                with mv_cols[i]:
-                                    st.button(mv, key=f"tb_{prow['name']}_{role}_{row_start}_{i}", disabled=True, use_container_width=True)
+                            pad = (core4 + [None] * 4)[:4]
+                            with st.container(border=True):
+                                top_l, top_r = st.columns(2)
+                                with top_l:
+                                    if pad[0]:
+                                        st.button(
+                                            pad[0],
+                                            key=f"tb_{prow['name']}_{role}_{row_start}_q0",
+                                            disabled=True,
+                                            use_container_width=True,
+                                        )
+                                    else:
+                                        st.caption("—")
+                                with top_r:
+                                    if pad[1]:
+                                        st.button(
+                                            pad[1],
+                                            key=f"tb_{prow['name']}_{role}_{row_start}_q1",
+                                            disabled=True,
+                                            use_container_width=True,
+                                        )
+                                    else:
+                                        st.caption("—")
+                                bot_l, bot_r = st.columns(2)
+                                with bot_l:
+                                    if pad[2]:
+                                        st.button(
+                                            pad[2],
+                                            key=f"tb_{prow['name']}_{role}_{row_start}_q2",
+                                            disabled=True,
+                                            use_container_width=True,
+                                        )
+                                    else:
+                                        st.caption("—")
+                                with bot_r:
+                                    if pad[3]:
+                                        st.button(
+                                            pad[3],
+                                            key=f"tb_{prow['name']}_{role}_{row_start}_q3",
+                                            disabled=True,
+                                            use_container_width=True,
+                                        )
+                                    else:
+                                        st.caption("—")
                         else:
                             st.caption("No moves resolved (check network / PokeAPI).")
                         with st.expander("Why this Pokémon"):
