@@ -1,4 +1,4 @@
-"""2026 Battle Architect — streamlit run app.py"""
+"""Pokemon 2026 Macdro — streamlit run app.py"""
 
 from __future__ import annotations
 
@@ -416,8 +416,10 @@ def best_type_effectiveness_vs(move_names: list[str], opponent_types: list[str])
 COMPETITIVE_BATTLE_LEVEL = 50
 COMPETITIVE_IV = 31
 # 252 offensive / 252 Speed / 4 HP; nature +Speed −Atk (Timid) or −Sp.Atk (Jolly)
-SCORING_BINARY = "Binary (1 pt if any super-effective)"
-SCORING_WEIGHTED = "Weighted (add effectiveness: 2× or 4× per turn when SE)"
+SCORING_BINARY = "Standard Coverage: Counts every super-effective hit as equal."
+SCORING_WEIGHTED = (
+    "Max Damage Bias: Rewards 4× weaknesses (Double Super-Effective) more heavily."
+)
 SCORING_COMPETITIVE = (
     "Competitive EV/IV (Lv 50: 31 IV, 252/252/4 + Speed nature — damage stub × speed)"
 )
@@ -620,8 +622,8 @@ def run_coverage_battle(
     return (my_pts, opp_pts, "tie")
 
 
-st.set_page_config(page_title="2026 Battle Architect", layout="wide", initial_sidebar_state="expanded")
-st.title("2026 Battle Architect")
+st.set_page_config(page_title="Pokemon 2026 Macdro", layout="wide", initial_sidebar_state="expanded")
+st.title("Pokemon 2026 Macdro")
 st.caption("Pokémon Champions · Legends Z-A meta ledger")
 
 csv_path = resolve_csv_path()
@@ -1029,8 +1031,8 @@ with t3:
 with t4:
     st.subheader("Monte Carlo — coverage simulator")
     st.caption(
-        "Each **turn** picks a random slot on both teams (3v3 or 6v6). **Binary / Weighted** use only type "
-        "effectiveness (PokeAPI move types, **cached 24h**). **Competitive EV/IV** adds **Lv 50** stats with "
+        "Each **turn** picks a random slot on both teams (3v3 or 6v6). **Standard Coverage** and **Max Damage Bias** "
+        "use only type effectiveness (PokeAPI move types, **cached 24h**). **Competitive EV/IV** adds **Lv 50** stats with "
         "**31 IV**, **252 / 252 / 4** EVs, **Timid** (special) or **Jolly** (physical), then a **damage stub** "
         "(STAB + type chart) scaled by **Speed** (+5% faster, −5% slower)."
     )
@@ -1224,7 +1226,7 @@ with t4:
                     f"{n_b} battles vs random **{pool_label}** **{team_size}v{team_size}** teams · "
                     f"**{int(num_turns)}** turns/battle · seed **{int(seed_val)}** · "
                     f"**{move_pool.split()[0]}** moves · "
-                    f"**{'binary' if scoring == SCORING_BINARY else 'weighted' if scoring == SCORING_WEIGHTED else 'competitive Lv50'}** scoring."
+                    f"**{'standard coverage' if scoring == SCORING_BINARY else 'max damage bias' if scoring == SCORING_WEIGHTED else 'competitive Lv50'}** scoring."
                 )
 
                 with st.expander("Sample battle log (first battles in this run)"):
