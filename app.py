@@ -1276,6 +1276,10 @@ with t3:
     tb_party_size = 6
     tb_opts = sorted(df["name"].astype(str).unique().tolist())
 
+    def _randomize_team_builder_seed() -> None:
+        # on_click runs before widgets bind keys — avoids StreamlitAPIException on tb_seed_val.
+        st.session_state["tb_seed_val"] = random.randint(1, 2_147_483_646)
+
     sg1, sg2 = st.columns([2, 1])
     with sg1:
         tb_seed = st.number_input(
@@ -1289,9 +1293,11 @@ with t3:
     with sg2:
         st.write("")
         st.write("")
-        if st.button("Randomize seed", key="tb_seed_rand"):
-            st.session_state["tb_seed_val"] = random.randint(1, 2_147_483_646)
-            st.rerun()
+        st.button(
+            "Randomize seed",
+            key="tb_seed_rand",
+            on_click=_randomize_team_builder_seed,
+        )
 
     h1, h2, h3 = st.columns(3)
     with h1:
