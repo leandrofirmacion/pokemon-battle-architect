@@ -1309,7 +1309,7 @@ def score_party_trios_paired(
 
 st.set_page_config(page_title="Pokemon 2026 Macdro", layout="wide", initial_sidebar_state="expanded")
 st.title("Pokemon 2026 Macdro")
-st.caption("Pokémon Champions · Legends Z-A meta ledger")
+st.caption("Pokémon Champions · Legends Z-A · Mega Dimension (DLC) meta ledger")
 
 csv_path = resolve_csv_path()
 if csv_path is None:
@@ -1432,26 +1432,35 @@ def _apply_mode_preset() -> None:
         st.session_state["side_mega_pick"] = "All"
         st.session_state["side_game_type_pick"] = "Champions only"
         st.session_state["bs_opponent_pool"] = "Champions (full dex)"
+        st.session_state["tb_quick_opp"] = "Champions (full dex)"
         st.session_state["bs_roster_mode"] = "Active 3 (ranked ladder)"
     elif p == "Legends Z-A ranked 3v3":
-        st.session_state["side_game_pick"] = ["Legends Z-A"]
+        st.session_state["side_game_pick"] = ["Legends Z-A", "Legends Z-A Mega Dimension"]
         st.session_state["side_type_pick"] = []
         st.session_state["side_mega_pick"] = "All"
         st.session_state["side_game_type_pick"] = "Legends Z-A only"
         st.session_state["bs_opponent_pool"] = "Sidebar-filtered roster"
+        st.session_state["tb_quick_opp"] = "Sidebar-filtered roster"
         st.session_state["bs_roster_mode"] = "Active 3 (ranked ladder)"
     elif p == "Party planning":
-        st.session_state["side_game_pick"] = ["Champions", "Legends Z-A"]
+        st.session_state["side_game_pick"] = ["Champions", "Legends Z-A", "Legends Z-A Mega Dimension"]
         st.session_state["side_type_pick"] = []
         st.session_state["side_mega_pick"] = "All"
         st.session_state["side_game_type_pick"] = "Any"
         st.session_state["bs_opponent_pool"] = "Sidebar-filtered roster"
+        st.session_state["tb_quick_opp"] = "Sidebar-filtered roster"
         st.session_state["bs_roster_mode"] = "Party box (6 Pokémon)"
 
 
 with st.sidebar:
     st.header("Global filter")
-    st.selectbox("Mode preset", options=list(MODE_PRESETS), key="ui_mode_preset")
+    st.selectbox(
+        "Mode preset",
+        options=list(MODE_PRESETS),
+        key="ui_mode_preset",
+        on_change=_apply_mode_preset,
+        help="Changing the preset applies sidebar, Battle Simulator, and Team Builder quick-sim opponent defaults.",
+    )
     st.button("Apply preset", key="ui_mode_apply", on_click=_apply_mode_preset)
     type_pick = st.multiselect(
         "Type",
@@ -1477,10 +1486,10 @@ with st.sidebar:
     with st.expander("Advanced filters", expanded=False):
         game_pick = st.multiselect(
             "Game version",
-            options=["Champions", "Legends Z-A"],
-            default=["Champions", "Legends Z-A"],
+            options=["Champions", "Legends Z-A", "Legends Z-A Mega Dimension"],
+            default=["Champions", "Legends Z-A", "Legends Z-A Mega Dimension"],
             key="side_game_pick",
-            help="Rows where game_source contains the selected label.",
+            help="Rows where game_source contains the selected label (Mega Dimension is Z-A DLC).",
         )
         game_type_pick = st.selectbox(
             "Game type",
