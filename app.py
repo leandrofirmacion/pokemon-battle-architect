@@ -761,10 +761,10 @@ def _competitive_ev_and_nature_mults(b_atk: int, b_spa: int) -> tuple[dict[str, 
     return ev, nm
 
 
-def competitive_ev_spread_summary(b_atk: int, b_spa: int) -> tuple[str, str, str]:
+def competitive_ev_spread_summary(b_atk: int, b_spa: int) -> tuple[str, str, str, dict[str, int]]:
     """
     Human-readable modeled EVs and nature (not usage data).
-    Returns (ev_line, nature_line, footnote).
+    Returns (ev_line, nature_line, footnote, ev_by_stat_key).
     """
     ev, _ = _competitive_ev_and_nature_mults(b_atk, b_spa)
     order = ("speed", "attack", "sp_attack", "hp", "defense", "sp_defense")
@@ -776,7 +776,7 @@ def competitive_ev_spread_summary(b_atk: int, b_spa: int) -> tuple[str, str, str
     else:
         nature_line = "Timid (+Spe −Atk)"
     foot = f"Lv {COMPETITIVE_BATTLE_LEVEL}, IV {COMPETITIVE_IV}; same rule as **Competitive EV/IV** in Battle Simulator."
-    return ev_line, nature_line, foot
+    return ev_line, nature_line, foot, ev
 
 
 @st.cache_data(ttl=86400, show_spinner=False)
@@ -1433,7 +1433,15 @@ with t1:
                 "Speed": int(row["speed"]),
             }
             b_atk, b_spa = int(row["attack"]), int(row["sp_attack"])
-            ev_line, nature_line, ev_foot = competitive_ev_spread_summary(b_atk, b_spa)
+            _, nature_line, ev_foot, ev_raw = competitive_ev_spread_summary(b_atk, b_spa)
+            ev_stats = {
+                "HP": ev_raw["hp"],
+                "Attack": ev_raw["attack"],
+                "Defense": ev_raw["defense"],
+                "Sp. Atk": ev_raw["sp_attack"],
+                "Sp. Def": ev_raw["sp_defense"],
+                "Speed": ev_raw["speed"],
+            }
             chart_c, ev_c = st.columns([3, 2], gap="medium")
             with chart_c:
                 fig = go.Figure(
@@ -1457,9 +1465,26 @@ with t1:
                 )
                 st.plotly_chart(fig, use_container_width=True)
             with ev_c:
-                st.markdown("**Modeled EVs** (heuristic)")
-                st.markdown(ev_line)
-                st.markdown(f"**Nature:** {nature_line}")
+                fig_ev = go.Figure(
+                    go.Bar(
+                        x=list(ev_stats.values()),
+                        y=list(ev_stats.keys()),
+                        orientation="h",
+                        marker_color="#00cc96",
+                        name="EVs",
+                    )
+                )
+                fig_ev.update_layout(
+                    title="Modeled EVs",
+                    xaxis_title="EVs",
+                    xaxis=dict(range=[0, 280]),
+                    yaxis=dict(autorange="reversed"),
+                    showlegend=False,
+                    margin=dict(t=50, b=40, l=40, r=24),
+                    height=320,
+                )
+                st.plotly_chart(fig_ev, use_container_width=True)
+                st.caption(f"Nature: {nature_line}")
                 st.caption(ev_foot)
 
             st.markdown("**Best moves to use** (heuristic score share among listed moves)")
