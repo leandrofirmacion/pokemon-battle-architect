@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import ast
+import html
 import itertools
 import json
 import math
@@ -167,6 +168,128 @@ def type_badge_html(t: str) -> str:
         f'<span style="background:{c};color:#fff;padding:4px 10px;border-radius:6px;'
         f'font-weight:600;margin:2px;display:inline-block;">{t.title()}</span>'
     )
+
+
+def type_pill_compact_html(t: str) -> str:
+    """Outlined pill for card rows (uppercase label, contrast-aware text)."""
+    tlow = str(t or "").strip().lower()
+    if tlow == "—" or not tlow:
+        tlow = "unknown"
+    bg = TYPE_COLORS.get(tlow, "#888888")
+    dark_text_types = {"electric", "ice", "fairy", "normal", "ground", "steel"}
+    fg = "#111111" if tlow in dark_text_types else "#ffffff"
+    label = tlow.upper()
+    return (
+        f'<span style="background:{bg};color:{fg};padding:3px 10px;border-radius:999px;'
+        f'font-weight:700;font-size:11px;letter-spacing:0.05em;'
+        f'border:1.5px solid #1a1a1a;text-transform:uppercase;display:inline-block;'
+        f'vertical-align:middle;white-space:nowrap;">{html.escape(label)}</span>'
+    )
+
+
+def pokedex_moves_card_html(pokemon_name: str, move_rows: list[dict]) -> str:
+    """
+    Zebra list: move name + type pill; right column rank + heuristic % share.
+    move_rows: dicts with Move, Type, % (float).
+    """
+    title = html.escape(str(pokemon_name))
+    parts: list[str] = [
+        '<div style="border:1px solid #c8ccd4;border-radius:10px;overflow:hidden;'
+        'background:#e8eaef;box-sizing:border-box;margin:0 0 14px 0;">',
+        '<div style="padding:14px 16px;font-weight:700;color:#2d3748;font-size:16px;'
+        'border-bottom:1px solid #c8ccd4;background:#e2e5eb;">'
+        f"Best moves for {title}</div>",
+        '<div style="padding:6px 16px 10px;font-size:12px;color:#4a5568;font-weight:500;'
+        'border-bottom:1px solid #dcdfe6;background:#eef0f4;">'
+        "% values are share of heuristic score among listed moves (not usage data).</div>",
+    ]
+    n = len(move_rows)
+    for i, r in enumerate(move_rows):
+        zebra = "#ffffff" if i % 2 == 0 else "#ebeef2"
+        rank = i + 1
+        mv = html.escape(str(r.get("Move", "—")))
+        typ = str(r.get("Type") or "—")
+        try:
+            pct = float(r.get("%", 0))
+        except (TypeError, ValueError):
+            pct = 0.0
+        bottom = "" if i == n - 1 else "border-bottom:1px solid #dcdfe6;"
+        parts.append(
+            f'<div style="display:flex;align-items:center;justify-content:space-between;gap:14px;'
+            f'padding:12px 16px;background:{zebra};{bottom}">'
+            f'<div style="display:flex;align-items:center;flex-wrap:wrap;min-width:0;gap:8px;">'
+            f'<span style="font-weight:600;color:#2d3748;font-size:15px;">{mv}</span>'
+            f"{type_pill_compact_html(typ)}</div>"
+            f'<div style="flex-shrink:0;text-align:right;line-height:1.25;">'
+            f'<div style="font-weight:700;color:#2d3748;font-size:15px;">#{rank}</div>'
+            f'<div style="font-size:12px;color:#718096;font-weight:600;">{pct:.1f}%</div>'
+            f"</div></div>"
+        )
+    parts.append("</div>")
+    return "".join(parts)
+
+
+def pokedex_teammates_card_html(
+    pokemon_name: str,
+    mates: list[tuple[str, float]],
+    roster: pd.DataFrame,
+) -> str:
+    """Sprite + name + type pills; right column coverage score (not usage %)."""
+    title = html.escape(str(pokemon_name))
+    parts: list[str] = [
+        '<div style="border:1px solid #c8ccd4;border-radius:10px;overflow:hidden;'
+        'background:#e8eaef;box-sizing:border-box;margin:0 0 14px 0;">',
+        '<div style="padding:14px 16px;font-weight:700;color:#2d3748;font-size:16px;'
+        'border-bottom:1px solid #c8ccd4;background:#e2e5eb;">'
+        f"Suggested teammates for {title}</div>",
+        '<div style="padding:6px 16px 10px;font-size:12px;color:#4a5568;font-weight:500;'
+        'border-bottom:1px solid #dcdfe6;background:#eef0f4;">'
+        "Coverage heuristic vs types that threaten this Pokémon — not ladder usage.</div>",
+    ]
+    n = len(mates)
+    for i, (mn, sc) in enumerate(mates):
+        zebra = "#ffffff" if i % 2 == 0 else "#ebeef2"
+        bottom = "" if i == n - 1 else "border-bottom:1px solid #dcdfe6;"
+        sub = roster.loc[roster["name"].astype(str) == str(mn)]
+        if sub.empty:
+            img_html = (
+                '<div style="width:44px;height:44px;background:#cbd5e0;border-radius:8px;'
+                'flex-shrink:0;"></div>'
+            )
+            types: list[str] = []
+        else:
+            tr = sub.iloc[0]
+            url = tr.get("image_url")
+            if pd.notna(url) and str(url).strip():
+                u = html.escape(str(url).strip(), quote=True)
+                img_html = (
+                    f'<img src="{u}" alt="" style="width:44px;height:44px;object-fit:contain;'
+                    f'flex-shrink:0;display:block;" loading="lazy"/>'
+                )
+            else:
+                img_html = (
+                    '<div style="width:44px;height:44px;background:#cbd5e0;border-radius:8px;'
+                    'flex-shrink:0;"></div>'
+                )
+            types = [str(x) for x in parse_list_cell(tr.get("types"))]
+        name_esc = html.escape(str(mn))
+        pills = "".join(type_pill_compact_html(t) for t in types) if types else ""
+        parts.append(
+            f'<div style="display:flex;align-items:center;justify-content:space-between;gap:12px;'
+            f'padding:12px 16px;background:{zebra};{bottom}">'
+            f'<div style="display:flex;align-items:center;gap:12px;min-width:0;flex:1;">'
+            f"{img_html}"
+            f'<div style="min-width:0;"><div style="font-weight:700;color:#2d3748;font-size:15px;">'
+            f"{name_esc}</div>"
+            f'<div style="margin-top:4px;display:flex;flex-wrap:wrap;align-items:center;gap:6px;">'
+            f"{pills}</div></div></div>"
+            f'<div style="flex-shrink:0;text-align:right;line-height:1.25;">'
+            f'<div style="font-weight:700;color:#2d3748;font-size:15px;">{sc:.1f}</div>'
+            f'<div style="font-size:11px;color:#718096;font-weight:600;">score</div>'
+            f"</div></div>"
+        )
+    parts.append("</div>")
+    return "".join(parts)
 
 
 def _type_cell_style(type_name: str) -> str:
@@ -1487,29 +1610,20 @@ with t1:
                 st.caption(f"Nature: {nature_line}")
                 st.caption(ev_foot)
 
-            st.markdown("**Best moves to use** (heuristic score share among listed moves)")
             move_rows = scored_moves_for_detail(row, top_n=8)
-            if move_rows:
-                st.dataframe(
-                    pd.DataFrame(move_rows),
-                    use_container_width=True,
-                    hide_index=True,
-                    column_config={
-                        "%": st.column_config.NumberColumn("%", format="%.1f"),
-                    },
-                )
-            else:
-                st.caption("No scored moves (empty learnset or PokéAPI).")
-
             sel_types = parse_list_cell(row.get("types"))
             mates = suggested_teammates(show, pick, sel_types, top_k=6)
-            st.markdown("**Suggested teammates** (type coverage vs threats—not usage meta)")
-            if mates:
-                st.markdown(
-                    "\n".join(f"- **{mn}** (coverage score {sc:.1f})" for mn, sc in mates)
-                )
-            else:
-                st.caption("No suggestions (missing types or single Pokémon in view).")
+            mv_col, tm_col = st.columns(2, gap="medium")
+            with mv_col:
+                if move_rows:
+                    st.markdown(pokedex_moves_card_html(pick, move_rows), unsafe_allow_html=True)
+                else:
+                    st.caption("No scored moves (empty learnset or PokéAPI).")
+            with tm_col:
+                if mates:
+                    st.markdown(pokedex_teammates_card_html(pick, mates, show), unsafe_allow_html=True)
+                else:
+                    st.caption("No teammate suggestions (missing types or only one Pokémon in view).")
 
             prof = pokemon_pokeapi_profile(pick)
             if prof:
