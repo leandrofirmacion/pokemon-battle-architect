@@ -1657,7 +1657,7 @@ with t1:
 
             move_rows = scored_moves_for_detail(row, top_n=8)
             sel_types = parse_list_cell(row.get("types"))
-            mates = suggested_teammates(show, pick, sel_types, top_k=6)
+            mates = suggested_teammates(df, pick, sel_types, top_k=6)
             mv_col, tm_col = st.columns(2, gap="medium")
             with mv_col:
                 if move_rows:
@@ -1666,9 +1666,12 @@ with t1:
                     st.caption("No scored moves (empty learnset or PokéAPI).")
             with tm_col:
                 if mates:
-                    st.markdown(pokedex_teammates_card_html(pick, mates, show), unsafe_allow_html=True)
+                    st.markdown(pokedex_teammates_card_html(pick, mates, df), unsafe_allow_html=True)
                 else:
-                    st.caption("No teammate suggestions (missing types or only one Pokémon in view).")
+                    st.caption(
+                        "No teammate suggestions (missing types on this Pokémon, or fewer than two "
+                        "Pokémon match **sidebar** filters)."
+                    )
 
             prof = pokemon_pokeapi_profile(pick)
             if prof:
