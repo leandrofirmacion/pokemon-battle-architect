@@ -747,6 +747,38 @@ def _nature_mults(plus: str, minus: str) -> dict[str, float]:
     return m
 
 
+def _competitive_ev_and_nature_mults(b_atk: int, b_spa: int) -> tuple[dict[str, int], dict[str, float]]:
+    """
+    252 Speed + 252 in the higher attacking stat + 4 HP; +Spe nature lowers the unused attack.
+    Shared by battle sim and Pokedex EV summary.
+    """
+    if b_atk >= b_spa:
+        ev = {"hp": 4, "attack": 252, "defense": 0, "sp_attack": 0, "sp_defense": 0, "speed": 252}
+        nm = _nature_mults("speed", "sp_attack")
+    else:
+        ev = {"hp": 4, "attack": 0, "defense": 0, "sp_attack": 252, "sp_defense": 0, "speed": 252}
+        nm = _nature_mults("speed", "attack")
+    return ev, nm
+
+
+def competitive_ev_spread_summary(b_atk: int, b_spa: int) -> tuple[str, str, str]:
+    """
+    Human-readable modeled EVs and nature (not usage data).
+    Returns (ev_line, nature_line, footnote).
+    """
+    ev, _ = _competitive_ev_and_nature_mults(b_atk, b_spa)
+    order = ("speed", "attack", "sp_attack", "hp", "defense", "sp_defense")
+    labels = {"hp": "HP", "attack": "Atk", "defense": "Def", "sp_attack": "SpA", "sp_defense": "SpD", "speed": "Spe"}
+    bits = [f"{ev[k]} {labels[k]}" for k in order if ev.get(k, 0) > 0]
+    ev_line = " / ".join(bits)
+    if b_atk >= b_spa:
+        nature_line = "Jolly (+Spe −SpA)"
+    else:
+        nature_line = "Timid (+Spe −Atk)"
+    foot = f"Lv {COMPETITIVE_BATTLE_LEVEL}, IV {COMPETITIVE_IV}; same rule as **Competitive EV/IV** in Battle Simulator."
+    return ev_line, nature_line, foot
+
+
 @st.cache_data(ttl=86400, show_spinner=False)
 def competitive_final_stats_cached(
     name: str,
@@ -763,12 +795,7 @@ def competitive_final_stats_cached(
     """
     L = COMPETITIVE_BATTLE_LEVEL
     iv = COMPETITIVE_IV
-    if b_atk >= b_spa:
-        ev = {"hp": 4, "attack": 252, "defense": 0, "sp_attack": 0, "sp_defense": 0, "speed": 252}
-        nm = _nature_mults("speed", "sp_attack")
-    else:
-        ev = {"hp": 4, "attack": 0, "defense": 0, "sp_attack": 252, "sp_defense": 0, "speed": 252}
-        nm = _nature_mults("speed", "attack")
+    ev, nm = _competitive_ev_and_nature_mults(b_atk, b_spa)
 
     def ev_s(stat: str) -> int:
         return int(ev.get(stat, 0))
@@ -1405,26 +1432,35 @@ with t1:
                 "Sp. Def": int(row["sp_defense"]),
                 "Speed": int(row["speed"]),
             }
-            fig = go.Figure(
-                go.Bar(
-                    x=list(stats.values()),
-                    y=list(stats.keys()),
-                    orientation="h",
-                    marker_color="#636efa",
-                    name=pick,
+            b_atk, b_spa = int(row["attack"]), int(row["sp_attack"])
+            ev_line, nature_line, ev_foot = competitive_ev_spread_summary(b_atk, b_spa)
+            chart_c, ev_c = st.columns([3, 2], gap="medium")
+            with chart_c:
+                fig = go.Figure(
+                    go.Bar(
+                        x=list(stats.values()),
+                        y=list(stats.keys()),
+                        orientation="h",
+                        marker_color="#636efa",
+                        name=pick,
+                    )
                 )
-            )
-            xmax = max(160, max(stats.values()) + 20)
-            fig.update_layout(
-                title="Base stats",
-                xaxis_title="Value",
-                xaxis=dict(range=[0, xmax]),
-                yaxis=dict(autorange="reversed"),
-                showlegend=False,
-                margin=dict(t=50, b=40, l=40, r=24),
-                height=320,
-            )
-            st.plotly_chart(fig, use_container_width=True)
+                xmax = max(160, max(stats.values()) + 20)
+                fig.update_layout(
+                    title="Base stats",
+                    xaxis_title="Value",
+                    xaxis=dict(range=[0, xmax]),
+                    yaxis=dict(autorange="reversed"),
+                    showlegend=False,
+                    margin=dict(t=50, b=40, l=40, r=24),
+                    height=320,
+                )
+                st.plotly_chart(fig, use_container_width=True)
+            with ev_c:
+                st.markdown("**Modeled EVs** (heuristic)")
+                st.markdown(ev_line)
+                st.markdown(f"**Nature:** {nature_line}")
+                st.caption(ev_foot)
 
             st.markdown("**Best moves to use** (heuristic score share among listed moves)")
             move_rows = scored_moves_for_detail(row, top_n=8)
