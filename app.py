@@ -244,7 +244,8 @@ def pokedex_teammates_card_html(
         f"Suggested teammates for {title}</div>",
         '<div style="padding:6px 16px 10px;font-size:12px;color:#4a5568;font-weight:500;'
         'border-bottom:1px solid #dcdfe6;background:#eef0f4;">'
-        "Coverage heuristic vs types that threaten this Pokémon — not ladder usage.</div>",
+        "Coverage vs threats + varied typings: each pick favors types not already in the list; "
+        "dual-types may overlap with earlier rows — not ladder usage.</div>",
     ]
     n = len(mates)
     for i, (mn, sc) in enumerate(mates):
@@ -563,23 +564,28 @@ def suggested_teammates(
     selected_name: str,
     selected_types: list[str],
     top_k: int = 6,
+    diversity_weight: float = 2.75,
 ) -> list[tuple[str, float]]:
     """
-    Heuristic: partners that resist many types that threaten the selected Pokémon.
-    Not usage-based meta—coverage suggestion only.
+    Heuristic: up to ``top_k`` partners that resist threats to the selected Pokémon,
+    chosen greedily so later picks favor typings not already seen (dual-types may
+    overlap—shared types are allowed; we only boost *new* types to the running set).
+    Not usage-based meta.
     """
     threats = attack_types_super_effective_vs(selected_types)
     if not threats or roster.empty:
         return []
 
-    scores: list[tuple[str, float]] = []
+    # Best coverage score per name (dedupe duplicate rows)
+    best: dict[str, tuple[float, frozenset[str]]] = {}
     for _, r in roster.iterrows():
         name = str(r["name"])
         if name == selected_name:
             continue
-        tms = [str(x).lower() for x in parse_list_cell(r.get("types"))]
+        tms = [str(x).lower().strip() for x in parse_list_cell(r.get("types")) if str(x).strip()]
         if not tms:
             continue
+        ts = frozenset(tms)
         pts = 0.0
         for w in threats:
             m = type_multiplier(w, tms)
@@ -591,10 +597,40 @@ def suggested_teammates(
                 pts += 0.2
             else:
                 pts -= 1.5
-        scores.append((name, pts))
+        prev = best.get(name)
+        if prev is None or pts > prev[0]:
+            best[name] = (pts, ts)
 
-    scores.sort(key=lambda x: x[1], reverse=True)
-    return scores[:top_k]
+    pool = [(n, sc, ts) for n, (sc, ts) in best.items()]
+    if not pool:
+        return []
+
+    chosen: list[tuple[str, float]] = []
+    used_types: set[str] = set()
+    picked_names: set[str] = set()
+
+    while len(chosen) < top_k and pool:
+        best_i = -1
+        best_key: tuple[float, float, str] = (-1.0, -1.0, "")
+        for i, (n, sc, ts) in enumerate(pool):
+            if n in picked_names:
+                continue
+            new_t = {t for t in ts if t not in used_types}
+            diversity = float(len(new_t))
+            adj = sc + diversity_weight * diversity
+            key = (adj, sc, n)
+            if key > best_key:
+                best_key = key
+                best_i = i
+        if best_i < 0:
+            break
+        n, sc, ts = pool[best_i]
+        chosen.append((n, sc))
+        picked_names.add(n)
+        used_types |= set(ts)
+        # keep pool for next round (do not remove; skip picked_names in loop)
+
+    return chosen
 
 
 LEDGER_HIDDEN_COLS = frozenset({"all_moves", "national_dex_hint", "pokemon_id"})
