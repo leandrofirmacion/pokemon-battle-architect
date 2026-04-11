@@ -329,6 +329,151 @@ def recommended_four_moves(row: pd.Series) -> list[str]:
     return out[:4]
 
 
+def _pokemon_name_to_slug(name: str) -> str:
+    slug = name.lower().replace(" ", "-").replace("'", "").replace(".", "").replace("é", "e")
+    slug = "".join(ch for ch in slug if ch.isalnum() or ch == "-")
+    while "--" in slug:
+        slug = slug.replace("--", "-")
+    return slug.strip("-")
+
+
+@st.cache_data(ttl=86400, show_spinner=False)
+def pokemon_pokeapi_profile(display_name: str) -> dict | None:
+    """Abilities and held items from PokéAPI (no CSV). Items are often empty for many species."""
+    slug = _pokemon_name_to_slug(display_name)
+    if not slug:
+        return None
+    try:
+        r = requests.get(f"https://pokeapi.co/api/v2/pokemon/{slug}", timeout=10)
+        if r.status_code != 200:
+            return None
+        d = r.json()
+        abilities: list[tuple[str, bool]] = []
+        for ent in d.get("abilities") or []:
+            ab = (ent.get("ability") or {}).get("name")
+            if ab:
+                abilities.append((str(ab).replace("-", " ").title(), bool(ent.get("is_hidden"))))
+        items: list[str] = []
+        for hi in d.get("held_items") or []:
+            it = (hi.get("item") or {}).get("name")
+            if it:
+                items.append(str(it).replace("-", " ").title())
+        return {"abilities": abilities, "held_items": sorted(set(items))}
+    except requests.RequestException:
+        return None
+
+
+def scored_moves_for_detail(row: pd.Series, top_n: int = 8) -> list[dict]:
+    """
+    Same scoring as recommended_four_moves; top_n moves with type and share of total score (%).
+    """
+    moves = parse_list_cell(row.get("all_moves"))
+    if not moves:
+        return []
+    if len(moves) > 55:
+        moves = list(dict.fromkeys(moves[:38] + moves[-17:]))
+
+    types = [t.lower() for t in parse_list_cell(row.get("types"))]
+    atk, spa = int(row["attack"]), int(row["sp_attack"])
+    phys_bias = 1.12 if atk >= spa else 1.0
+    spec_bias = 1.12 if spa > atk else 1.0
+
+    scored: list[tuple[float, str]] = []
+    for m in moves:
+        det = move_pokeapi_details(str(m))
+        if not det:
+            continue
+        mt = (det.get("type") or "").lower()
+        power = det.get("power")
+        dc = (det.get("damage_class") or "status").lower()
+        stab = 1.5 if mt in types else 1.0
+
+        if power is not None and int(power) > 0:
+            sc = float(power) * stab
+            if dc == "physical":
+                sc *= phys_bias
+            elif dc == "special":
+                sc *= spec_bias
+        else:
+            sc = _status_move_priority(str(m)) * (1.08 if stab else 1.0)
+
+        scored.append((sc, str(m)))
+
+    scored.sort(key=lambda x: x[0], reverse=True)
+    out: list[tuple[float, str]] = []
+    seen: set[str] = set()
+    for sc, name in scored:
+        if name in seen:
+            continue
+        seen.add(name)
+        out.append((sc, name))
+        if len(out) >= top_n:
+            break
+
+    if not out:
+        return []
+
+    total = sum(s for s, _ in out)
+    rows: list[dict] = []
+    for sc, name in out:
+        det = move_pokeapi_details(name)
+        mtype = ((det or {}).get("type") or "—").title()
+        pct = (100.0 * sc / total) if total > 0 else 0.0
+        rows.append({"Move": name, "Type": mtype, "%": round(pct, 1)})
+    return rows
+
+
+def attack_types_super_effective_vs(def_types: list[str]) -> list[str]:
+    """Attacking types that deal >1× to the given defending types."""
+    dlow = [t.lower().strip() for t in def_types if str(t).strip()]
+    if not dlow:
+        return []
+    weak: list[str] = []
+    for atk in TYPE_CHART.keys():
+        if type_multiplier(atk, dlow) > 1.0:
+            weak.append(atk)
+    return weak
+
+
+def suggested_teammates(
+    roster: pd.DataFrame,
+    selected_name: str,
+    selected_types: list[str],
+    top_k: int = 6,
+) -> list[tuple[str, float]]:
+    """
+    Heuristic: partners that resist many types that threaten the selected Pokémon.
+    Not usage-based meta—coverage suggestion only.
+    """
+    threats = attack_types_super_effective_vs(selected_types)
+    if not threats or roster.empty:
+        return []
+
+    scores: list[tuple[str, float]] = []
+    for _, r in roster.iterrows():
+        name = str(r["name"])
+        if name == selected_name:
+            continue
+        tms = [str(x).lower() for x in parse_list_cell(r.get("types"))]
+        if not tms:
+            continue
+        pts = 0.0
+        for w in threats:
+            m = type_multiplier(w, tms)
+            if m == 0.0:
+                pts += 3.0
+            elif m < 1.0:
+                pts += 2.0
+            elif m == 1.0:
+                pts += 0.2
+            else:
+                pts -= 1.5
+        scores.append((name, pts))
+
+    scores.sort(key=lambda x: x[1], reverse=True)
+    return scores[:top_k]
+
+
 LEDGER_HIDDEN_COLS = frozenset({"all_moves", "national_dex_hint", "pokemon_id"})
 
 
@@ -1260,27 +1405,68 @@ with t1:
                 "Sp. Def": int(row["sp_defense"]),
                 "Speed": int(row["speed"]),
             }
-            fig = go.Figure()
-            fig.add_trace(
-                go.Scatterpolar(
-                    r=list(stats.values()) + [list(stats.values())[0]],
-                    theta=list(stats.keys()) + [list(stats.keys())[0]],
-                    fill="toself",
+            fig = go.Figure(
+                go.Bar(
+                    x=list(stats.values()),
+                    y=list(stats.keys()),
+                    orientation="h",
+                    marker_color="#636efa",
                     name=pick,
-                    line_color="#636efa",
                 )
             )
+            xmax = max(160, max(stats.values()) + 20)
             fig.update_layout(
-                polar=dict(radialaxis=dict(visible=True, range=[0, max(160, max(stats.values()) + 20)])),
-                showlegend=False,
                 title="Base stats",
-                margin=dict(t=60, b=40, l=40, r=40),
-                height=420,
+                xaxis_title="Value",
+                xaxis=dict(range=[0, xmax]),
+                yaxis=dict(autorange="reversed"),
+                showlegend=False,
+                margin=dict(t=50, b=40, l=40, r=24),
+                height=320,
             )
             st.plotly_chart(fig, use_container_width=True)
+
+            st.markdown("**Best moves to use** (heuristic score share among listed moves)")
+            move_rows = scored_moves_for_detail(row, top_n=8)
+            if move_rows:
+                st.dataframe(
+                    pd.DataFrame(move_rows),
+                    use_container_width=True,
+                    hide_index=True,
+                    column_config={
+                        "%": st.column_config.NumberColumn("%", format="%.1f"),
+                    },
+                )
+            else:
+                st.caption("No scored moves (empty learnset or PokéAPI).")
+
+            sel_types = parse_list_cell(row.get("types"))
+            mates = suggested_teammates(show, pick, sel_types, top_k=6)
+            st.markdown("**Suggested teammates** (type coverage vs threats—not usage meta)")
+            if mates:
+                st.markdown(
+                    "\n".join(f"- **{mn}** (coverage score {sc:.1f})" for mn, sc in mates)
+                )
+            else:
+                st.caption("No suggestions (missing types or single Pokémon in view).")
+
+            prof = pokemon_pokeapi_profile(pick)
+            if prof:
+                ab_parts: list[str] = []
+                for label, is_h in prof["abilities"]:
+                    ab_parts.append(f"{label} (hidden)" if is_h else label)
+                st.markdown("**Abilities (PokéAPI):** " + (" · ".join(ab_parts) if ab_parts else "—"))
+                hi = prof.get("held_items") or []
+                st.markdown(
+                    "**Held items (species default, PokéAPI):** "
+                    + (", ".join(hi) if hi else "None listed for this form.")
+                )
+            else:
+                st.caption("Abilities/items: PokéAPI lookup failed (check name spelling or network).")
+
             rmoves = recommended_four_moves(row)
             if rmoves:
-                st.markdown("**Moveset:** " + " · ".join(rmoves))
+                st.markdown("**Moveset (top 4):** " + " · ".join(rmoves))
             else:
                 st.caption("Moveset could not be resolved (empty learnset or PokeAPI).")
 
